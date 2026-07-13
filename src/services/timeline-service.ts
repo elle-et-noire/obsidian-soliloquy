@@ -55,28 +55,34 @@ export class TimelineService {
 	async updatePost(post: TimelinePost, content: string): Promise<void> {
 		const text = content.replace(/\r\n?/g, '\n').trim();
 		if (!text) return;
-		const blockId = post.blockId ?? this.createBlockId();
+		const proposedBlockId = post.blockId ?? this.createBlockId();
+		let updatedPost: TimelinePost | undefined;
 
 		await this.app.vault.process(post.file, (source) => {
-			const lines = source.split(/\r?\n/);
-			const currentHeader = lines[post.lineStart];
-			const currentMatch = currentHeader ? POST_PATTERN.exec(currentHeader) : null;
-			if (currentMatch?.[1] !== post.time) {
-				throw new Error('The post changed before it could be edited.');
-			}
-			lines.splice(
-				post.lineStart,
-				post.lineEnd - post.lineStart,
-				...this.formatPost(
-					post.time,
-					text,
-					blockId,
-					post.replyLink,
-				).split('\n'),
+			const current = this.findCurrentPost(
+				source,
+				post,
+				true,
+				'The post changed before it could be edited.',
 			);
-			return lines.join('\n');
+			const blockId = current.blockId ?? proposedBlockId;
+			const replacement = this.formatPost(
+				current.time,
+				text,
+				blockId,
+				current.replyLink,
+			).split('\n');
+			updatedPost = {
+				...current,
+				content: text,
+				blockId,
+				lineEnd: current.lineStart + replacement.length,
+			};
+			return this.replacePost(source, current, replacement);
 		});
-		post.blockId = blockId;
+
+		if (!updatedPost) throw new Error('The post could not be updated.');
+		Object.assign(post, updatedPost);
 	}
 
 	async updateTask(post: TimelinePost, taskIndex: number, checked: boolean): Promise<void> {
@@ -186,22 +192,82 @@ export class TimelineService {
 	}
 
 	private async ensureBlockId(post: TimelinePost): Promise<string> {
-		if (post.blockId) return post.blockId;
-		const blockId = this.createBlockId();
+		const proposedBlockId = post.blockId ?? this.createBlockId();
+		let updatedPost: TimelinePost | undefined;
 		await this.app.vault.process(post.file, (source) => {
-			const lines = source.split(/\r?\n/);
-			const header = lines[post.lineStart];
-			const match = header ? POST_PATTERN.exec(header) : null;
-			if (match?.[1] !== post.time) throw new Error('The parent post changed.');
-			lines.splice(
-				post.lineStart,
-				post.lineEnd - post.lineStart,
-				...this.formatPost(post.time, post.content, blockId, post.replyLink).split('\n'),
+			const current = this.findCurrentPost(
+				source,
+				post,
+				post.blockId === undefined,
+				'The parent post changed.',
 			);
-			return lines.join('\n');
+			if (current.blockId) {
+				updatedPost = current;
+				return source;
+			}
+
+			const replacement = this.formatPost(
+				current.time,
+				current.content,
+				proposedBlockId,
+				current.replyLink,
+			).split('\n');
+			updatedPost = {
+				...current,
+				blockId: proposedBlockId,
+				lineEnd: current.lineStart + replacement.length,
+			};
+			return this.replacePost(source, current, replacement);
 		});
-		post.blockId = blockId;
-		return blockId;
+
+		if (!updatedPost?.blockId) throw new Error('The parent post could not be identified.');
+		Object.assign(post, updatedPost);
+		return updatedPost.blockId;
+	}
+
+	private findCurrentPost(
+		source: string,
+		post: TimelinePost,
+		requireUnchanged: boolean,
+		errorMessage: string,
+	): TimelinePost {
+		const section = this.timelineLines(source);
+		const candidates = this.parsePosts(
+			section.lines,
+			section.lineOffset,
+			post.date,
+			post.file,
+		);
+		const matches = post.blockId
+			? candidates.filter((candidate) => candidate.blockId === post.blockId)
+			: candidates.filter((candidate) => this.hasSameSnapshot(candidate, post));
+
+		if (matches.length !== 1) throw new Error(errorMessage);
+		const current = matches[0];
+		if (!current || (requireUnchanged && !this.hasSameSnapshot(current, post))) {
+			throw new Error(errorMessage);
+		}
+		return current;
+	}
+
+	private hasSameSnapshot(current: TimelinePost, expected: TimelinePost): boolean {
+		return current.time === expected.time
+			&& current.content === expected.content
+			&& current.replyLink === expected.replyLink;
+	}
+
+	private replacePost(
+		source: string,
+		current: TimelinePost,
+		replacement: string[],
+	): string {
+		const lines = source.split(/\r?\n/);
+		lines.splice(
+			current.lineStart,
+			current.lineEnd - current.lineStart,
+			...replacement,
+		);
+		return lines.join('\n');
 	}
 
 	private createBlockId(): string {
