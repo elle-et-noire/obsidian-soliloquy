@@ -1,32 +1,28 @@
 import {
 	ItemView,
-	MarkdownRenderer,
 	MarkdownView,
-	moment,
 	Notice,
 	setIcon,
 	WorkspaceLeaf,
 } from 'obsidian';
 import type { TimelineService } from '../services/timeline-service';
 import type { TimelinePost } from '../types';
+import { resizeTextarea, SoliloquyComposer } from './composer';
+import { PostCardRenderer, type PostContext } from './post-card';
 
 export const SOLILOQUY_VIEW_TYPE = 'soliloquy-timeline';
 
 export class SoliloquyView extends ItemView {
 	private timelineEl?: HTMLElement;
-	private composerEl?: HTMLElement;
-	private textareaEl?: HTMLTextAreaElement;
-	private searchEl?: HTMLTextAreaElement;
-	private searchButtonEl?: HTMLButtonElement;
-	private postButtonEl?: HTMLButtonElement;
-	private statsEl?: HTMLElement;
-	private searchMode = false;
+	private composer?: SoliloquyComposer;
+	private readonly postRenderer: PostCardRenderer;
 	private posts: TimelinePost[] = [];
 	private editing?: { post: TimelinePost; textarea: HTMLTextAreaElement };
 	private replyTargets = new WeakMap<HTMLTextAreaElement, TimelinePost>();
 	private timelineReplyTargets = new WeakSet<HTMLTextAreaElement>();
 	private activeThread?: TimelinePost;
 	private inlineReplyComposerEl?: HTMLElement;
+	private inlineReplyButtonEl?: HTMLButtonElement;
 	private inlineReplyPostKey?: string;
 	private focusedPostKey?: string;
 	private timelineScrollTop?: number;
@@ -34,6 +30,30 @@ export class SoliloquyView extends ItemView {
 
 	constructor(leaf: WorkspaceLeaf, private readonly service: TimelineService) {
 		super(leaf);
+		this.postRenderer = new PostCardRenderer(this.app, this, {
+			getReplies: (post) => post.blockId
+				? this.posts.filter((candidate) => candidate.replyToBlockId === post.blockId)
+				: [],
+			getPostKey: (post) => this.postKey(post),
+			isFocused: (post) => this.focusedPostKey === this.postKey(post),
+			onEdit: (card, post) => this.openEditor(card, post),
+			onFocus: (card, post, scroll) => this.focusPost(card, post, scroll),
+			onOpenDate: (post) => {
+				void this.app.workspace.getLeaf('tab').openFile(post.file, { active: true });
+			},
+			onOpenLink: (destination, post) => {
+				void this.app.workspace.openLinkText(destination, post.file.path, true);
+			},
+			onOpenPost: (post) => void this.openDailyNoteAtPost(post),
+			onOpenThread: (post) => void this.openThread(post),
+			onReply: (card, button, post, stayOnTimeline) => {
+				this.openInlineReply(card, button, post, stayOnTimeline);
+			},
+			onSearchTag: (tag) => this.searchForTag(tag),
+			onTaskChange: (post, taskIndex, checked) => {
+				void this.saveTaskState(post, taskIndex, checked);
+			},
+		});
 	}
 
 	getViewType(): string {
@@ -53,58 +73,23 @@ export class SoliloquyView extends ItemView {
 		root.empty();
 		root.addClass('soliloquy-view');
 
-		const composer = root.createDiv({ cls: 'soliloquy-composer' });
-		this.composerEl = composer;
-		this.textareaEl = composer.createEl('textarea', {
-			cls: 'soliloquy-input',
-			attr: { placeholder: 'Ctrl + Enter to post', rows: '1' },
+		this.composer = new SoliloquyComposer(root, this, {
+			onPost: () => void this.submit(),
+			onSearchChange: () => void this.renderTimeline(),
 		});
-		this.searchEl = composer.createEl('textarea', {
-			cls: 'soliloquy-search',
+		this.timelineEl = root.createDiv({
+			cls: 'soliloquy-timeline',
 			attr: {
-				rows: '1',
-				placeholder: 'Search posts',
-				'aria-label': 'Search posts',
+				role: 'feed',
+				'aria-label': 'Soliloquy timeline',
+				'aria-busy': 'false',
 			},
 		});
-		this.searchEl.hide();
-		const actions = composer.createDiv({ cls: 'soliloquy-composer-actions' });
-		this.statsEl = actions.createSpan({ cls: 'soliloquy-stats' });
-		const buttons = actions.createDiv({ cls: 'soliloquy-composer-buttons' });
-		const searchToggle = buttons.createEl('button', {
-			cls: 'soliloquy-search-toggle',
-			attr: { 'aria-label': 'Search', 'aria-pressed': 'false' },
-		});
-		this.searchButtonEl = searchToggle;
-		setIcon(searchToggle, 'search');
-		const postButton = buttons.createEl('button', {
-			cls: 'mod-cta soliloquy-post-button',
-			attr: { 'aria-label': 'Post' },
-		});
-		this.postButtonEl = postButton;
-		setIcon(postButton, 'send');
-
-		this.registerDomEvent(this.textareaEl, 'input', () => this.resizeTextarea(this.textareaEl!));
-		postButton.addEventListener('click', () => {
-			if (this.searchMode) {
-				this.setSearchMode(false);
-			} else {
-				void this.submit();
-			}
-		});
-		searchToggle.addEventListener('click', () => {
-			this.setSearchMode(true);
-		});
-		this.registerDomEvent(this.searchEl, 'input', () => {
-			this.resizeTextarea(this.searchEl!);
-			void this.renderTimeline();
-		});
-		this.timelineEl = root.createDiv({ cls: 'soliloquy-timeline' });
 		await this.refreshTimeline();
 	}
 
 	submitFromShortcut(target: EventTarget | null): boolean {
-		if (this.textareaEl && target === this.textareaEl) {
+		if (this.composer && target === this.composer.postInput) {
 			void this.submit();
 			return true;
 		}
@@ -130,33 +115,39 @@ export class SoliloquyView extends ItemView {
 	async refreshTimeline(): Promise<void> {
 		if (!this.timelineEl) return;
 		const epoch = ++this.renderEpoch;
+		this.timelineEl.setAttribute('aria-busy', 'true');
 		this.editing = undefined;
 		this.replyTargets = new WeakMap<HTMLTextAreaElement, TimelinePost>();
 		this.timelineReplyTargets = new WeakSet<HTMLTextAreaElement>();
-		const posts = await this.service.getPosts();
-		if (epoch !== this.renderEpoch) return;
-		this.posts = posts;
-		this.updateStats();
-		if (this.activeThread) {
-			const current = this.findCurrentPost(this.activeThread);
-			if (current) {
-				this.activeThread = current;
-				await this.renderThreadPage(current, epoch);
-				return;
+		try {
+			const posts = await this.service.getPosts();
+			if (epoch !== this.renderEpoch) return;
+			this.posts = posts;
+			this.composer?.updateStats(this.posts);
+			if (this.activeThread) {
+				const current = this.findCurrentPost(this.activeThread);
+				if (current) {
+					this.activeThread = current;
+					await this.renderThreadPage(current, epoch);
+					return;
+				}
+				this.activeThread = undefined;
 			}
-			this.activeThread = undefined;
+			await this.renderTimeline(epoch);
+		} finally {
+			if (epoch === this.renderEpoch) this.timelineEl.setAttribute('aria-busy', 'false');
 		}
-		await this.renderTimeline(epoch);
 	}
 
 	private async renderTimeline(epoch = ++this.renderEpoch): Promise<void> {
 		if (!this.timelineEl) return;
-		this.composerEl?.show();
-		this.inlineReplyComposerEl = undefined;
-		this.inlineReplyPostKey = undefined;
+		this.composer?.element.show();
+		this.closeInlineReply(false);
 		this.timelineEl.removeClass('is-thread-page');
+		this.timelineEl.setAttribute('role', 'feed');
+		this.timelineEl.setAttribute('aria-label', 'Soliloquy timeline');
 		this.editing = undefined;
-		const query = this.searchEl?.value.trim().toLocaleLowerCase() ?? '';
+		const query = this.composer?.getSearchQuery() ?? '';
 		const terms = query.split(/\s+/).filter(Boolean);
 		const posts = terms.length === 0
 			? this.posts
@@ -167,12 +158,13 @@ export class SoliloquyView extends ItemView {
 				const searchable = `${post.date} ${post.time} ${post.content} ${replies.map((reply) => reply.content).join(' ')}`.toLocaleLowerCase();
 				return terms.every((term) => searchable.includes(term));
 			});
-		this.updateStats(posts.length);
+		this.composer?.updateStats(this.posts, posts.length);
 		this.timelineEl.empty();
 		if (posts.length === 0) {
 			this.timelineEl.createDiv({
 				text: terms.length > 0 ? 'No matching posts.' : 'No posts yet.',
 				cls: 'soliloquy-empty',
+				attr: { role: 'status' },
 			});
 			return;
 		}
@@ -181,12 +173,11 @@ export class SoliloquyView extends ItemView {
 	}
 
 	private async submit(): Promise<void> {
-		const input = this.textareaEl;
+		const input = this.composer?.postInput;
 		if (!input || !input.value.trim()) return;
 		try {
 			await this.service.addPost(input.value);
-			input.value = '';
-			this.resizeTextarea(input);
+			this.composer?.clearPost();
 			await this.refreshTimeline();
 			input.focus();
 		} catch (error) {
@@ -195,183 +186,19 @@ export class SoliloquyView extends ItemView {
 		}
 	}
 
-	private setSearchMode(enabled: boolean): void {
-		this.searchMode = enabled;
-		this.searchButtonEl?.toggleClass('is-active', enabled);
-		this.searchButtonEl?.setAttribute('aria-pressed', String(enabled));
-		this.postButtonEl?.toggleClass('is-muted', enabled);
-		this.textareaEl?.toggle(!enabled);
-		this.searchEl?.toggle(enabled);
-		if (enabled) {
-			if (this.searchEl) this.resizeTextarea(this.searchEl);
-			void this.renderTimeline();
-			this.searchEl?.focus();
-			return;
-		}
-		if (this.searchEl) {
-			this.searchEl.value = '';
-			this.resizeTextarea(this.searchEl);
-		}
-		void this.renderTimeline();
-		this.textareaEl?.focus();
-	}
-
-	private async searchForTag(tag: string): Promise<void> {
+	private searchForTag(tag: string): void {
 		this.activeThread = undefined;
 		this.focusedPostKey = undefined;
-		this.setSearchMode(true);
-		if (!this.searchEl) return;
-		this.searchEl.value = tag;
-		this.resizeTextarea(this.searchEl);
-		await this.renderTimeline();
-		this.searchEl.focus();
-	}
-
-	private resizeTextarea(textarea: HTMLTextAreaElement): void {
-		textarea.setCssProps({ '--soliloquy-textarea-height': 'auto' });
-		const overflowing = textarea.scrollHeight > 240;
-		textarea.setCssProps({
-			'--soliloquy-textarea-height': `${Math.min(textarea.scrollHeight, 240)}px`,
-		});
-		textarea.toggleClass('is-overflowing', overflowing);
-	}
-
-	private updateStats(hitCount?: number): void {
-		if (!this.statsEl) return;
-		this.statsEl.empty();
-		if (this.searchMode) {
-			const matches = hitCount ?? this.posts.length;
-			const resultStat = this.statsEl.createSpan({
-				cls: 'soliloquy-stat',
-				attr: { 'aria-label': `Matches: ${matches}` },
-			});
-			setIcon(resultStat, 'search');
-			resultStat.createSpan({ text: String(matches) });
-			return;
-		}
-		const today = moment().format('YYYY-MM-DD');
-		const todayCount = this.posts.filter((post) => post.date === today).length;
-		const todayStat = this.statsEl.createSpan({
-			cls: 'soliloquy-stat',
-			attr: { 'aria-label': `Today: ${todayCount}` },
-		});
-		setIcon(todayStat, 'calendar-days');
-		todayStat.createSpan({ text: String(todayCount) });
-		const totalStat = this.statsEl.createSpan({
-			cls: 'soliloquy-stat',
-			attr: { 'aria-label': `Total: ${this.posts.length}` },
-		});
-		setIcon(totalStat, 'messages-square');
-		totalStat.createSpan({ text: String(this.posts.length) });
+		this.composer?.element.show();
+		this.composer?.searchFor(tag);
 	}
 
 	private async renderPost(
 		post: TimelinePost,
 		container: HTMLElement,
-		context: 'timeline' | 'root' | 'reply' = 'timeline',
+		context: PostContext = 'timeline',
 	): Promise<void> {
-		const card = container.createDiv({
-			cls: `soliloquy-post${context === 'root' ? ' soliloquy-thread-root' : ''}`,
-		});
-		card.tabIndex = -1;
-		let dragStart: { x: number; y: number } | undefined;
-		let dragged = false;
-		card.addEventListener('pointerdown', (event) => {
-			if (event.button !== 0) return;
-			dragStart = { x: event.clientX, y: event.clientY };
-			dragged = false;
-		});
-		card.addEventListener('pointermove', (event) => {
-			if (!dragStart || (event.buttons & 1) === 0) return;
-			const distance = Math.hypot(event.clientX - dragStart.x, event.clientY - dragStart.y);
-			if (distance > 4) dragged = true;
-		});
-		const replies = post.blockId
-			? this.posts.filter((candidate) => candidate.replyToBlockId === post.blockId)
-			: [];
-		const content = card.createDiv({ cls: 'soliloquy-post-content markdown-rendered' });
-		await MarkdownRenderer.render(this.app, post.content, content, post.file.path, this);
-		content.addEventListener('change', (event) => {
-			const target = event.target;
-			if (!(target instanceof HTMLInputElement) || target.type !== 'checkbox') return;
-			const checkboxes = Array.from(content.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
-			const taskIndex = checkboxes.indexOf(target);
-			if (taskIndex < 0) return;
-			void this.saveTaskState(post, taskIndex, target.checked);
-		});
-		const meta = card.createDiv({ cls: 'soliloquy-post-meta' });
-		const dateButton = meta.createEl('button', {
-			cls: 'soliloquy-date-button',
-			text: post.date,
-			attr: { 'aria-label': `Open daily note for ${post.date}` },
-		});
-		const timeButton = meta.createEl('button', {
-			cls: 'soliloquy-time-button',
-			text: post.time,
-			attr: { 'aria-label': `Open post from ${post.time} in the daily note` },
-		});
-		const replyButton = meta.createEl('button', {
-			cls: 'soliloquy-reply-button',
-			attr: {
-				'aria-label': `${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}`,
-			},
-		});
-		setIcon(replyButton, 'message-circle');
-		replyButton.createSpan({ text: String(replies.length), cls: 'soliloquy-reply-count' });
-		const editButton = meta.createEl('button', {
-			cls: 'soliloquy-edit-button',
-			attr: { 'aria-label': 'Edit' },
-		});
-		setIcon(editButton, 'pencil');
-		dateButton.addEventListener('click', (event) => {
-			event.stopPropagation();
-			void this.app.workspace.getLeaf('tab').openFile(post.file, { active: true });
-		});
-		timeButton.addEventListener('click', (event) => {
-			event.stopPropagation();
-			void this.openDailyNoteAtPost(post);
-		});
-		editButton.addEventListener('click', (event) => {
-			event.stopPropagation();
-			this.openEditor(card, post);
-		});
-		replyButton.addEventListener('click', (event) => {
-			event.stopPropagation();
-			this.openInlineReply(card, post, context === 'timeline');
-		});
-		content.addEventListener('click', (event) => {
-			const target = event.target;
-			if (!(target instanceof Element)) return;
-			const tagLink = target.closest('a.tag');
-			if (tagLink) {
-				const tag = tagLink.textContent?.trim();
-				if (!tag) return;
-				event.preventDefault();
-				event.stopPropagation();
-				void this.searchForTag(tag.startsWith('#') ? tag : `#${tag}`);
-				return;
-			}
-			const internalLink = target.closest('a.internal-link');
-			if (!internalLink) return;
-			const destination = internalLink.getAttribute('data-href')
-				?? internalLink.getAttribute('href');
-			if (!destination) return;
-			event.preventDefault();
-			event.stopPropagation();
-			void this.app.workspace.openLinkText(destination, post.file.path, true);
-		});
-		card.addEventListener('click', (event) => {
-			const target = event.target;
-			if (target instanceof Element && target.closest('a, button, input, textarea')) return;
-			if (dragged) {
-				dragged = false;
-				return;
-			}
-			if (this.focusedPostKey !== this.postKey(post)) void this.openThread(post);
-		});
-		if (context !== 'timeline' && this.focusedPostKey === this.postKey(post)) {
-			this.focusPost(card, post, true);
-		}
+		await this.postRenderer.render(post, container, context);
 	}
 
 	private async openDailyNoteAtPost(post: TimelinePost): Promise<void> {
@@ -392,6 +219,7 @@ export class SoliloquyView extends ItemView {
 
 	private openInlineReply(
 		card: HTMLElement,
+		button: HTMLButtonElement,
 		post: TimelinePost,
 		stayOnTimeline: boolean,
 	): void {
@@ -401,28 +229,47 @@ export class SoliloquyView extends ItemView {
 			return;
 		}
 
-		this.closeInlineReply();
-		const composer = card.createDiv({ cls: 'soliloquy-inline-reply-composer' });
+		this.closeInlineReply(false);
+		const composer = card.createDiv({
+			cls: 'soliloquy-inline-reply-composer',
+			attr: { role: 'group', 'aria-label': `Reply to post from ${post.date} at ${post.time}` },
+		});
 		composer.addEventListener('click', (event) => event.stopPropagation());
 		this.inlineReplyComposerEl = composer;
+		this.inlineReplyButtonEl = button;
 		this.inlineReplyPostKey = postKey;
+		button.setAttribute('aria-expanded', 'true');
 		const textarea = composer.createEl('textarea', {
 			cls: 'soliloquy-reply-input',
-			attr: { rows: '1', placeholder: 'Ctrl + Enter to reply' },
+			attr: {
+				rows: '1',
+				placeholder: 'Ctrl + Enter to reply',
+				'aria-label': 'Write a reply',
+				'aria-keyshortcuts': 'Control+Enter',
+			},
 		});
 		this.replyTargets.set(textarea, post);
 		if (stayOnTimeline) this.timelineReplyTargets.add(textarea);
-		this.registerDomEvent(textarea, 'input', () => this.resizeTextarea(textarea));
 		const actions = composer.createDiv({ cls: 'soliloquy-inline-reply-actions' });
 		const cancel = actions.createEl('button', {
-			attr: { 'aria-label': 'Cancel' },
+			attr: { type: 'button', 'aria-label': 'Cancel reply' },
 		});
 		setIcon(cancel, 'x');
 		const submit = actions.createEl('button', {
 			cls: 'mod-cta',
-			attr: { 'aria-label': 'Reply' },
+			attr: { type: 'button', 'aria-label': 'Reply' },
 		});
+		submit.disabled = true;
 		setIcon(submit, 'send');
+		textarea.addEventListener('input', () => {
+			resizeTextarea(textarea);
+			submit.disabled = !textarea.value.trim();
+		});
+		textarea.addEventListener('keydown', (event) => {
+			if (event.key !== 'Escape') return;
+			event.preventDefault();
+			this.closeInlineReply();
+		});
 		cancel.addEventListener('click', (event) => {
 			event.stopPropagation();
 			this.closeInlineReply();
@@ -435,10 +282,14 @@ export class SoliloquyView extends ItemView {
 		textarea.focus();
 	}
 
-	private closeInlineReply(): void {
+	private closeInlineReply(restoreFocus = true): void {
+		const button = this.inlineReplyButtonEl;
+		button?.setAttribute('aria-expanded', 'false');
 		this.inlineReplyComposerEl?.remove();
 		this.inlineReplyComposerEl = undefined;
+		this.inlineReplyButtonEl = undefined;
 		this.inlineReplyPostKey = undefined;
+		if (restoreFocus) button?.focus();
 	}
 
 	private async openThread(post: TimelinePost): Promise<void> {
@@ -451,15 +302,17 @@ export class SoliloquyView extends ItemView {
 
 	private async renderThreadPage(post: TimelinePost, epoch: number): Promise<void> {
 		if (!this.timelineEl) return;
-		this.inlineReplyComposerEl = undefined;
-		this.inlineReplyPostKey = undefined;
-		this.composerEl?.hide();
+		this.closeInlineReply(false);
+		this.composer?.element.hide();
 		this.timelineEl.empty();
 		this.timelineEl.addClass('is-thread-page');
+		this.timelineEl.setAttribute('role', 'region');
+		this.timelineEl.setAttribute('aria-label', 'Soliloquy thread');
 		const navigation = this.timelineEl.createDiv({ cls: 'soliloquy-thread-navigation' });
 		const back = navigation.createEl('button', {
 			cls: 'soliloquy-back-button',
 			attr: {
+				type: 'button',
 				'aria-label': 'Back to timeline',
 				'aria-keyshortcuts': 'Alt+ArrowLeft',
 			},
@@ -488,9 +341,11 @@ export class SoliloquyView extends ItemView {
 		const scrollTop = this.timelineScrollTop;
 		this.timelineScrollTop = undefined;
 		this.activeThread = undefined;
-		this.focusedPostKey = undefined;
 		this.timelineEl?.removeClass('is-thread-page');
+		this.timelineEl?.setAttribute('role', 'feed');
+		this.timelineEl?.setAttribute('aria-label', 'Soliloquy timeline');
 		await this.renderTimeline();
+		this.focusedPostKey = undefined;
 		if (scrollTop !== undefined) {
 			window.requestAnimationFrame(() => {
 				this.contentEl.scrollTop = scrollTop;
@@ -607,7 +462,10 @@ export class SoliloquyView extends ItemView {
 		card.addClass('is-focused');
 		card.focus({ preventScroll: true });
 		if (scroll) {
-			window.requestAnimationFrame(() => card.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+			const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+				? 'auto'
+				: 'smooth';
+			window.requestAnimationFrame(() => card.scrollIntoView({ behavior, block: 'center' }));
 		}
 	}
 
@@ -616,29 +474,51 @@ export class SoliloquyView extends ItemView {
 	}
 
 	private openEditor(card: HTMLElement, post: TimelinePost): void {
+		this.focusedPostKey = this.postKey(post);
 		card.empty();
+		card.setAttribute('role', 'group');
+		card.setAttribute('aria-label', `Edit post from ${post.date} at ${post.time}`);
+		card.removeAttribute('aria-keyshortcuts');
 		const textarea = card.createEl('textarea', {
 			cls: 'soliloquy-edit-input',
-			attr: { rows: '1', placeholder: 'Ctrl + Enter to save' },
+			attr: {
+				rows: '1',
+				placeholder: 'Ctrl + Enter to save',
+				'aria-label': 'Edit post',
+				'aria-keyshortcuts': 'Control+Enter',
+			},
 		});
 		textarea.value = post.content;
-		this.registerDomEvent(textarea, 'input', () => this.resizeTextarea(textarea));
-		this.resizeTextarea(textarea);
+		resizeTextarea(textarea);
 		this.editing = { post, textarea };
 		const actions = card.createDiv({ cls: 'soliloquy-edit-actions' });
 		const cancel = actions.createEl('button', {
-			attr: { 'aria-label': 'Cancel' },
+			attr: { type: 'button', 'aria-label': 'Cancel edit' },
 		});
 		setIcon(cancel, 'x');
 		const save = actions.createEl('button', {
 			cls: 'mod-cta',
-			attr: { 'aria-label': 'Save' },
+			attr: { type: 'button', 'aria-label': 'Save edit' },
 		});
 		setIcon(save, 'check');
 
-		cancel.addEventListener('click', () => void this.refreshTimeline());
+		textarea.addEventListener('input', () => {
+			resizeTextarea(textarea);
+			save.disabled = !textarea.value.trim();
+		});
+		textarea.addEventListener('keydown', (event) => {
+			if (event.key !== 'Escape') return;
+			event.preventDefault();
+			void this.cancelEdit();
+		});
+		cancel.addEventListener('click', () => void this.cancelEdit());
 		save.addEventListener('click', () => void this.saveEdit(post, textarea.value));
 		textarea.focus();
+	}
+
+	private async cancelEdit(): Promise<void> {
+		await this.refreshTimeline();
+		this.focusedPostKey = undefined;
 	}
 
 	private async saveEdit(post: TimelinePost, content: string): Promise<void> {
@@ -649,6 +529,7 @@ export class SoliloquyView extends ItemView {
 		try {
 			await this.service.updatePost(post, content);
 			await this.refreshTimeline();
+			this.focusedPostKey = undefined;
 		} catch (error) {
 			console.error('Soliloquy: failed to edit post', error);
 			new Notice('Could not edit the post. Reload the timeline and try again.');
