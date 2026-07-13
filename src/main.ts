@@ -1,5 +1,6 @@
-import { Plugin, TFile, WorkspaceLeaf } from 'obsidian';
+import { Notice, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
 import { parseDailyNoteDate } from './services/daily-note-path';
+import { SettingsCoordinator } from './services/settings-coordinator';
 import { TimelineService } from './services/timeline-service';
 import {
 	DEFAULT_SETTINGS,
@@ -12,10 +13,22 @@ export default class SoliloquyPlugin extends Plugin {
 	settings!: SoliloquySettings;
 	service!: TimelineService;
 	private refreshTimer?: number;
+	private settingsCoordinator!: SettingsCoordinator<SoliloquySettings>;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.service = new TimelineService(this.app, () => this.settings);
+		this.settingsCoordinator = new SettingsCoordinator(
+			500,
+			(snapshot) => this.saveData(snapshot),
+			async (snapshot) => {
+				if (settingsEqual(this.settings, snapshot)) return;
+				this.settings = { ...snapshot };
+				this.service.invalidateAll();
+				await this.refreshViews();
+			},
+			(error) => this.reportSettingsError(error),
+		);
 
 		this.registerView(
 			SOLILOQUY_VIEW_TYPE,
@@ -59,6 +72,7 @@ export default class SoliloquyPlugin extends Plugin {
 		);
 		this.register(() => {
 			if (this.refreshTimer !== undefined) window.clearTimeout(this.refreshTimer);
+			void this.flushSettings();
 		});
 	}
 
@@ -70,10 +84,21 @@ export default class SoliloquyPlugin extends Plugin {
 		);
 	}
 
-	async saveSettings(): Promise<void> {
-		await this.saveData(this.settings);
-		this.service.invalidateAll();
-		await this.refreshViews();
+	scheduleSettingsSave(settings: SoliloquySettings): void {
+		this.settingsCoordinator.schedule({ ...settings });
+	}
+
+	async flushSettings(): Promise<void> {
+		try {
+			await this.settingsCoordinator.flush();
+		} catch (error) {
+			this.reportSettingsError(error);
+		}
+	}
+
+	private reportSettingsError(error: unknown): void {
+		console.error('Soliloquy: failed to save settings', error);
+		new Notice('Could not save soliloquy settings.');
 	}
 
 	private async activateView(): Promise<void> {
@@ -141,4 +166,10 @@ export default class SoliloquyPlugin extends Plugin {
 				}),
 		);
 	}
+}
+
+function settingsEqual(a: SoliloquySettings, b: SoliloquySettings): boolean {
+	return a.dailyNoteFolder === b.dailyNoteFolder
+		&& a.dailyNoteFormat === b.dailyNoteFormat
+		&& a.sectionHeading === b.sectionHeading;
 }

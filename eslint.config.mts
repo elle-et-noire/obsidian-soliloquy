@@ -44,6 +44,7 @@ export default defineConfig(
 		rules: {
 			'no-unsanitized/method': 'off',
 			'obsidianmd/no-nodejs-modules': 'off',
+			'obsidianmd/prefer-window-timers': 'off',
 		},
 	},
 );

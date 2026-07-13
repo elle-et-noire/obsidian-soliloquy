@@ -18,20 +18,24 @@ export const DEFAULT_SETTINGS: SoliloquySettings = {
 };
 
 export class SoliloquySettingTab extends PluginSettingTab {
+	private draft: SoliloquySettings;
+
 	constructor(app: App, private readonly plugin: SoliloquyPlugin) {
 		super(app, plugin);
+		this.draft = { ...plugin.settings };
 	}
 
 	display(): void {
 		this.containerEl.empty();
+		this.draft = { ...this.plugin.settings };
 
 		new Setting(this.containerEl)
 			.setName('Daily note folder')
 			.setDesc('Vault-relative folder containing daily notes.')
 			.addText((text) =>
-				text.setValue(this.plugin.settings.dailyNoteFolder).onChange(async (value) => {
-					this.plugin.settings.dailyNoteFolder = value.trim().replace(/^\/+|\/+$/g, '');
-					await this.plugin.saveSettings();
+				text.setValue(this.draft.dailyNoteFolder).onChange((value) => {
+					this.draft.dailyNoteFolder = value.trim().replace(/^\/+|\/+$/g, '');
+					this.scheduleDraft();
 				}),
 			);
 
@@ -39,24 +43,34 @@ export class SoliloquySettingTab extends PluginSettingTab {
 			.setName('Daily note format')
 			.setDesc('Moment-style path below the daily note folder.')
 			.addText((text) =>
-				text.setValue(this.plugin.settings.dailyNoteFormat).onChange(async (value) => {
+				text.setValue(this.draft.dailyNoteFormat).onChange((value) => {
 					const format = value.trim();
 					if (!this.updateFormatDescription(formatSetting, format)) return;
-					this.plugin.settings.dailyNoteFormat = format;
-					await this.plugin.saveSettings();
+					this.draft.dailyNoteFormat = format;
+					this.scheduleDraft();
 				}),
 			);
-		this.updateFormatDescription(formatSetting, this.plugin.settings.dailyNoteFormat);
+		this.updateFormatDescription(formatSetting, this.draft.dailyNoteFormat);
 
 		new Setting(this.containerEl)
 			.setName('Timeline heading')
 			.setDesc('Posts are stored below this level-two heading.')
 			.addText((text) =>
-				text.setValue(this.plugin.settings.sectionHeading).onChange(async (value) => {
-					this.plugin.settings.sectionHeading = value.trim() || 'soliloquy';
-					await this.plugin.saveSettings();
+				text.setValue(this.draft.sectionHeading).onChange((value) => {
+					this.draft.sectionHeading = value.trim() || 'soliloquy';
+					this.scheduleDraft();
 				}),
 			);
+	}
+
+	hide(): void {
+		void this.plugin.flushSettings();
+		super.hide();
+	}
+
+	private scheduleDraft(): void {
+		if (validateDailyNoteFormat(this.draft.dailyNoteFormat)) return;
+		this.plugin.scheduleSettingsSave(this.draft);
 	}
 
 	private updateFormatDescription(setting: Setting, format: string): boolean {

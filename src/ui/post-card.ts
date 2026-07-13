@@ -24,11 +24,22 @@ interface PostCardCallbacks {
 }
 
 export class PostCardRenderer {
+	private readonly renderedComponents = new Set<Component>();
+
 	constructor(
 		private readonly app: App,
 		private readonly owner: Component,
 		private readonly callbacks: PostCardCallbacks,
-	) {}
+	) {
+		this.owner.register(() => this.renderedComponents.clear());
+	}
+
+	clear(): void {
+		for (const component of this.renderedComponents) {
+			this.owner.removeChild(component);
+		}
+		this.renderedComponents.clear();
+	}
 
 	async render(
 		post: TimelinePost,
@@ -61,7 +72,15 @@ export class PostCardRenderer {
 
 		const replies = this.callbacks.getReplies(post);
 		const content = card.createDiv({ cls: 'soliloquy-post-content markdown-rendered' });
-		await MarkdownRenderer.render(this.app, post.content, content, post.file.path, this.owner);
+		const renderOwner = this.owner.addChild(new Component());
+		this.renderedComponents.add(renderOwner);
+		try {
+			await MarkdownRenderer.render(this.app, post.content, content, post.file.path, renderOwner);
+		} catch (error) {
+			this.owner.removeChild(renderOwner);
+			this.renderedComponents.delete(renderOwner);
+			throw error;
+		}
 		const checkboxes = Array.from(
 			content.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
 		);

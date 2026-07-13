@@ -6,6 +6,8 @@ interface ComposerCallbacks {
 	onSearchChange: () => void;
 }
 
+const SEARCH_DEBOUNCE_MS = 200;
+
 export class SoliloquyComposer {
 	readonly element: HTMLElement;
 	readonly postInput: HTMLTextAreaElement;
@@ -14,6 +16,7 @@ export class SoliloquyComposer {
 	private readonly searchButton: HTMLButtonElement;
 	private readonly postButton: HTMLButtonElement;
 	private searchMode = false;
+	private searchChangeTimer?: number;
 
 	constructor(
 		root: HTMLElement,
@@ -71,7 +74,7 @@ export class SoliloquyComposer {
 		});
 		owner.registerDomEvent(this.searchInput, 'input', () => {
 			resizeTextarea(this.searchInput);
-			this.callbacks.onSearchChange();
+			this.scheduleSearchChange();
 		});
 		owner.registerDomEvent(this.searchInput, 'keydown', (event) => {
 			if (event.key !== 'Escape') return;
@@ -82,6 +85,7 @@ export class SoliloquyComposer {
 		owner.registerDomEvent(this.searchButton, 'click', () => {
 			this.setSearchMode(!this.searchMode);
 		});
+		owner.register(() => this.cancelScheduledSearch());
 	}
 
 	isSearching(): boolean {
@@ -102,7 +106,7 @@ export class SoliloquyComposer {
 		this.searchInput.value = value;
 		resizeTextarea(this.searchInput);
 		this.setSearchMode(true, false);
-		this.callbacks.onSearchChange();
+		this.notifySearchChange();
 	}
 
 	setSearchMode(enabled: boolean, notify = true): void {
@@ -123,7 +127,26 @@ export class SoliloquyComposer {
 			resizeTextarea(this.searchInput);
 			this.postInput.focus();
 		}
-		if (notify) this.callbacks.onSearchChange();
+		if (notify) this.notifySearchChange();
+	}
+
+	private scheduleSearchChange(): void {
+		this.cancelScheduledSearch();
+		this.searchChangeTimer = window.setTimeout(() => {
+			this.searchChangeTimer = undefined;
+			this.callbacks.onSearchChange();
+		}, SEARCH_DEBOUNCE_MS);
+	}
+
+	private notifySearchChange(): void {
+		this.cancelScheduledSearch();
+		this.callbacks.onSearchChange();
+	}
+
+	private cancelScheduledSearch(): void {
+		if (this.searchChangeTimer === undefined) return;
+		window.clearTimeout(this.searchChangeTimer);
+		this.searchChangeTimer = undefined;
 	}
 
 	updateStats(posts: TimelinePost[], hitCount?: number): void {

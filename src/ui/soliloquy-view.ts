@@ -6,17 +6,22 @@ import {
 	WorkspaceLeaf,
 } from 'obsidian';
 import type { TimelineService } from '../services/timeline-service';
+import { TimelineIndex } from '../services/timeline-index';
 import type { TimelinePost } from '../types';
 import { resizeTextarea, SoliloquyComposer } from './composer';
 import { PostCardRenderer, type PostContext } from './post-card';
 
 export const SOLILOQUY_VIEW_TYPE = 'soliloquy-timeline';
 
+const TIMELINE_PAGE_SIZE = 50;
+const RENDER_BATCH_SIZE = 8;
+
 export class SoliloquyView extends ItemView {
 	private timelineEl?: HTMLElement;
 	private composer?: SoliloquyComposer;
 	private readonly postRenderer: PostCardRenderer;
 	private posts: TimelinePost[] = [];
+	private postIndex = new TimelineIndex([]);
 	private editing?: { post: TimelinePost; textarea: HTMLTextAreaElement };
 	private replyTargets = new WeakMap<HTMLTextAreaElement, TimelinePost>();
 	private timelineReplyTargets = new WeakSet<HTMLTextAreaElement>();
@@ -27,13 +32,15 @@ export class SoliloquyView extends ItemView {
 	private focusedPostKey?: string;
 	private timelineScrollTop?: number;
 	private renderEpoch = 0;
+	private timelineResults: TimelinePost[] = [];
+	private visiblePostCount = TIMELINE_PAGE_SIZE;
+	private renderedTimelineCount = 0;
+	private loadMoreEl?: HTMLElement;
 
 	constructor(leaf: WorkspaceLeaf, private readonly service: TimelineService) {
 		super(leaf);
 		this.postRenderer = new PostCardRenderer(this.app, this, {
-			getReplies: (post) => post.blockId
-				? this.posts.filter((candidate) => candidate.replyToBlockId === post.blockId)
-				: [],
+			getReplies: (post) => this.postIndex.getReplies(post),
 			getPostKey: (post) => this.postKey(post),
 			isFocused: (post) => this.focusedPostKey === this.postKey(post),
 			onEdit: (card, post) => this.openEditor(card, post),
@@ -75,7 +82,7 @@ export class SoliloquyView extends ItemView {
 
 		this.composer = new SoliloquyComposer(root, this, {
 			onPost: () => void this.submit(),
-			onSearchChange: () => void this.renderTimeline(),
+			onSearchChange: () => void this.renderTimeline(undefined, true),
 		});
 		this.timelineEl = root.createDiv({
 			cls: 'soliloquy-timeline',
@@ -123,6 +130,7 @@ export class SoliloquyView extends ItemView {
 			const posts = await this.service.getPosts();
 			if (epoch !== this.renderEpoch) return;
 			this.posts = posts;
+			this.postIndex = new TimelineIndex(posts);
 			this.composer?.updateStats(this.posts);
 			if (this.activeThread) {
 				const current = this.findCurrentPost(this.activeThread);
@@ -139,26 +147,32 @@ export class SoliloquyView extends ItemView {
 		}
 	}
 
-	private async renderTimeline(epoch = ++this.renderEpoch): Promise<void> {
+	private async renderTimeline(
+		epoch = ++this.renderEpoch,
+		resetVisiblePosts = false,
+	): Promise<void> {
 		if (!this.timelineEl) return;
+		this.timelineEl.setAttribute('aria-busy', 'true');
 		this.composer?.element.show();
 		this.closeInlineReply(false);
 		this.timelineEl.removeClass('is-thread-page');
 		this.timelineEl.setAttribute('role', 'feed');
 		this.timelineEl.setAttribute('aria-label', 'Soliloquy timeline');
 		this.editing = undefined;
+		if (resetVisiblePosts) this.visiblePostCount = TIMELINE_PAGE_SIZE;
 		const query = this.composer?.getSearchQuery() ?? '';
 		const terms = query.split(/\s+/).filter(Boolean);
 		const posts = terms.length === 0
 			? this.posts
 			: this.posts.filter((post) => {
-				const replies = post.blockId
-					? this.posts.filter((candidate) => candidate.replyToBlockId === post.blockId)
-					: [];
-				const searchable = `${post.date} ${post.time} ${post.content} ${replies.map((reply) => reply.content).join(' ')}`.toLocaleLowerCase();
+				const searchable = this.postIndex.getSearchText(post);
 				return terms.every((term) => searchable.includes(term));
 			});
 		this.composer?.updateStats(this.posts, posts.length);
+		this.timelineResults = posts;
+		this.renderedTimelineCount = 0;
+		this.loadMoreEl = undefined;
+		this.postRenderer.clear();
 		this.timelineEl.empty();
 		if (posts.length === 0) {
 			this.timelineEl.createDiv({
@@ -166,10 +180,66 @@ export class SoliloquyView extends ItemView {
 				cls: 'soliloquy-empty',
 				attr: { role: 'status' },
 			});
+			if (epoch === this.renderEpoch) this.timelineEl.setAttribute('aria-busy', 'false');
 			return;
 		}
-		await Promise.all(posts.map((post) => this.renderPost(post, this.timelineEl!)));
-		if (epoch !== this.renderEpoch) return;
+		const initialCount = Math.min(this.visiblePostCount, posts.length);
+		try {
+			await this.renderPostBatch(posts.slice(0, initialCount), epoch);
+			if (epoch !== this.renderEpoch) return;
+			this.renderedTimelineCount = initialCount;
+			this.renderLoadMoreControl(epoch);
+		} finally {
+			if (epoch === this.renderEpoch) this.timelineEl.setAttribute('aria-busy', 'false');
+		}
+	}
+
+	private async renderPostBatch(posts: TimelinePost[], epoch: number): Promise<void> {
+		if (!this.timelineEl) return;
+		for (let index = 0; index < posts.length; index += RENDER_BATCH_SIZE) {
+			if (epoch !== this.renderEpoch) return;
+			const batch = posts.slice(index, index + RENDER_BATCH_SIZE);
+			await Promise.all(batch.map((post) => this.renderPost(post, this.timelineEl!)));
+			if (epoch !== this.renderEpoch) return;
+			if (index + RENDER_BATCH_SIZE < posts.length) await nextAnimationFrame();
+		}
+	}
+
+	private renderLoadMoreControl(epoch: number): void {
+		this.loadMoreEl?.remove();
+		this.loadMoreEl = undefined;
+		if (!this.timelineEl || this.renderedTimelineCount >= this.timelineResults.length) return;
+		const remaining = this.timelineResults.length - this.renderedTimelineCount;
+		const amount = Math.min(TIMELINE_PAGE_SIZE, remaining);
+		const control = this.timelineEl.createDiv({ cls: 'soliloquy-load-more' });
+		this.loadMoreEl = control;
+		const button = control.createEl('button', {
+			text: `Load ${amount} older posts`,
+			attr: {
+				type: 'button',
+				'aria-label': `Load ${amount} older posts; ${remaining} remaining`,
+			},
+		});
+		button.addEventListener('click', () => void this.loadMorePosts(epoch, button));
+	}
+
+	private async loadMorePosts(epoch: number, button: HTMLButtonElement): Promise<void> {
+		if (epoch !== this.renderEpoch || !this.timelineEl) return;
+		button.disabled = true;
+		const start = this.renderedTimelineCount;
+		const end = Math.min(start + TIMELINE_PAGE_SIZE, this.timelineResults.length);
+		this.loadMoreEl?.remove();
+		this.loadMoreEl = undefined;
+		this.timelineEl.setAttribute('aria-busy', 'true');
+		try {
+			await this.renderPostBatch(this.timelineResults.slice(start, end), epoch);
+			if (epoch !== this.renderEpoch) return;
+			this.renderedTimelineCount = end;
+			this.visiblePostCount = end;
+			this.renderLoadMoreControl(epoch);
+		} finally {
+			if (epoch === this.renderEpoch) this.timelineEl.setAttribute('aria-busy', 'false');
+		}
 	}
 
 	private async submit(): Promise<void> {
@@ -304,6 +374,7 @@ export class SoliloquyView extends ItemView {
 		if (!this.timelineEl) return;
 		this.closeInlineReply(false);
 		this.composer?.element.hide();
+		this.postRenderer.clear();
 		this.timelineEl.empty();
 		this.timelineEl.addClass('is-thread-page');
 		this.timelineEl.setAttribute('role', 'region');
@@ -405,14 +476,7 @@ export class SoliloquyView extends ItemView {
 	}
 
 	private findChildren(parent: TimelinePost): TimelinePost[] {
-		if (!parent.blockId) return [];
-		return this.posts
-			.filter((candidate) => candidate.replyToBlockId === parent.blockId)
-			.sort((a, b) => {
-				const chronological = `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`);
-				if (chronological !== 0) return chronological;
-				return a.lineStart - b.lineStart;
-			});
+		return this.postIndex.getReplies(parent);
 	}
 
 	private findThreadRoot(post: TimelinePost): TimelinePost {
@@ -420,9 +484,7 @@ export class SoliloquyView extends ItemView {
 		const visited = new Set<string>();
 		while (current.replyToBlockId && !visited.has(this.postKey(current))) {
 			visited.add(this.postKey(current));
-			const parent = this.posts.find(
-				(candidate) => candidate.blockId === current.replyToBlockId,
-			);
+			const parent = this.postIndex.getPostByBlockId(current.replyToBlockId);
 			if (!parent) break;
 			current = parent;
 		}
@@ -434,9 +496,7 @@ export class SoliloquyView extends ItemView {
 		let current = post;
 		const visited = new Set<string>([this.postKey(post)]);
 		while (current.replyToBlockId) {
-			const parent = this.posts.find(
-				(candidate) => candidate.blockId === current.replyToBlockId,
-			);
+			const parent = this.postIndex.getPostByBlockId(current.replyToBlockId);
 			if (!parent || visited.has(this.postKey(parent))) break;
 			ancestors.unshift(parent);
 			visited.add(this.postKey(parent));
@@ -446,7 +506,7 @@ export class SoliloquyView extends ItemView {
 	}
 
 	private findCurrentPost(post: TimelinePost): TimelinePost | undefined {
-		if (post.blockId) return this.posts.find((candidate) => candidate.blockId === post.blockId);
+		if (post.blockId) return this.postIndex.getPostByBlockId(post.blockId);
 		return this.posts.find((candidate) =>
 			candidate.file.path === post.file.path
 			&& candidate.time === post.time
@@ -550,4 +610,8 @@ export class SoliloquyView extends ItemView {
 			await this.refreshTimeline();
 		}
 	}
+}
+
+function nextAnimationFrame(): Promise<void> {
+	return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
 }

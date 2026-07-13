@@ -274,6 +274,17 @@
 	border-radius: 0;
 }
 
+.soliloquy-load-more {
+	display: flex;
+	justify-content: center;
+	padding: var(--size-4-4) var(--size-4-3);
+}
+
+.soliloquy-load-more > button {
+	color: var(--text-accent);
+	font-size: var(--font-ui-small);
+}
+
 .soliloquy-post:not(.soliloquy-thread-root) {
 	cursor: pointer;
 }

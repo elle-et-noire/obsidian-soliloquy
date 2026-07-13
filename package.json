@@ -7,10 +7,12 @@
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"benchmark": "node scripts/benchmark.mjs",
+		"benchmark:generate": "node scripts/generate-performance-vault.mjs",
 		"validate:version": "node scripts/validate-version.mjs",
 		"version": "node version-bump.mjs && git add manifest.json versions.json",
 		"lint": "eslint .",
-		"test": "node --test tests/timeline-service.test.mjs"
+		"test": "node --test"
 	},
 	"keywords": [],
 	"license": "0-BSD",
