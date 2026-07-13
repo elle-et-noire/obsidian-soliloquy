@@ -37,6 +37,22 @@ if (!bundledSource) throw new Error('Timeline service test bundle was not genera
 const bundleUrl = `data:text/javascript;base64,${Buffer.from(bundledSource).toString('base64')}`;
 const { TimelineService } = await import(bundleUrl);
 
+const markdownBuildResult = await build({
+	entryPoints: ['src/services/timeline-markdown.ts'],
+	bundle: true,
+	format: 'esm',
+	platform: 'node',
+	target: 'node20',
+	write: false,
+});
+const bundledMarkdown = markdownBuildResult.outputFiles[0]?.text;
+if (!bundledMarkdown) throw new Error('Timeline Markdown test bundle was not generated.');
+const markdownBundleUrl = `data:text/javascript;base64,${Buffer.from(bundledMarkdown).toString('base64')}`;
+const {
+	appendPostToTimelineSection,
+	findTimelineSections,
+} = await import(markdownBundleUrl);
+
 const SETTINGS = {
 	dailyNoteFolder: 'log',
 	dailyNoteFormat: 'YYYY/MM/YYYY-MM-DD',
@@ -158,4 +174,86 @@ test('rejects indistinguishable legacy posts', async () => {
 		/The post changed before it could be edited\./,
 	);
 	assert.equal(harness.getSource(), initialSource);
+});
+
+test('matches only an exact H2 heading outside fenced code blocks', () => {
+	const source = [
+		'## soliloquy archive',
+		'Archive content',
+		'### soliloquy',
+		'Nested content',
+		'```md',
+		'## soliloquy',
+		'Fenced content',
+		'```',
+	].join('\n');
+
+	assert.equal(findTimelineSections(source, '## soliloquy').length, 0);
+	const updated = appendPostToTimelineSection(
+		source,
+		'## soliloquy',
+		'- 12:00 ^sol-new\n\tNew post',
+	);
+	const sections = findTimelineSections(updated, '## soliloquy');
+
+	assert.equal(sections.length, 1);
+	assert.deepEqual(sections[0]?.lines.slice(1, 3), [
+		'- 12:00 ^sol-new',
+		'\tNew post',
+	]);
+});
+
+test('does not end a timeline section at an H2 inside a code fence', () => {
+	const source = [
+		'## soliloquy',
+		'- 10:00 ^sol-target',
+		'\tTarget',
+		'~~~md',
+		'## fenced heading',
+		'~~~',
+		'After fence',
+		'## actual next section',
+		'Next content',
+	].join('\n');
+	const section = findTimelineSections(source, '## soliloquy')[0];
+
+	assert.ok(section);
+	assert.ok(section.lines.includes('## fenced heading'));
+	assert.ok(section.lines.includes('After fence'));
+	assert.ok(!section.lines.includes('## actual next section'));
+});
+
+test('rejects appending when exact timeline headings are duplicated', () => {
+	const source = [
+		'## soliloquy',
+		'- 10:00 ^sol-first',
+		'\tFirst',
+		'## soliloquy',
+		'- 11:00 ^sol-second',
+		'\tSecond',
+	].join('\n');
+
+	assert.equal(findTimelineSections(source, '## soliloquy').length, 2);
+	assert.throws(
+		() => appendPostToTimelineSection(source, '## soliloquy', '- 12:00 ^sol-new'),
+		/Multiple timeline sections/,
+	);
+});
+
+test('preserves CRLF line endings when appending a post', () => {
+	const source = [
+		'## soliloquy',
+		'',
+		'## next section',
+		'Next content',
+		'',
+	].join('\r\n');
+	const updated = appendPostToTimelineSection(
+		source,
+		'## soliloquy',
+		'- 12:00 ^sol-new\n\tNew post',
+	);
+
+	assert.equal(updated.replaceAll('\r\n', '').includes('\n'), false);
+	assert.match(updated, /## soliloquy\r\n- 12:00 \^sol-new\r\n\tNew post\r\n## next section/);
 });

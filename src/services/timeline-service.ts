@@ -2,6 +2,10 @@ import { App, moment, TFile } from 'obsidian';
 import type { SoliloquySettings } from '../settings';
 import type { TimelinePost } from '../types';
 import { buildDailyNotePath, parseDailyNoteDate } from './daily-note-path';
+import {
+	appendPostToTimelineSection,
+	findTimelineSections,
+} from './timeline-markdown';
 
 const POST_PATTERN = /^- (\d{2}:\d{2})(?:\s+\^([\w-]+))?(?:\s+(.+))?\s*$/;
 const REPLY_LINK_PATTERN = /^\[\[[^\]]*#\^([\w-]+)(?:\|[^\]]+)?\]\]$/;
@@ -36,20 +40,8 @@ export class TimelineService {
 		const line = this.formatPost(moment().format('HH:mm'), text, this.createBlockId(), replyLink);
 		const heading = `## ${this.getSettings().sectionHeading}`;
 
-		await this.app.vault.process(file, (source) => {
-			const sectionStart = source.indexOf(heading);
-			if (sectionStart < 0) {
-				const prefix = source.length > 0 && !source.endsWith('\n') ? '\n\n' : '';
-				return `${source}${prefix}${heading}\n\n${line}\n`;
-			}
-
-			const contentStart = sectionStart + heading.length;
-			const nextHeading = source.slice(contentStart).search(/\n##\s/);
-			const insertionPoint = nextHeading < 0 ? source.length : contentStart + nextHeading;
-			const before = source.slice(0, insertionPoint).replace(/\s*$/, '');
-			const after = source.slice(insertionPoint);
-			return `${before}\n${line}\n${after}`;
-		});
+		await this.app.vault.process(file, (source) =>
+			appendPostToTimelineSection(source, heading, line));
 	}
 
 	async updatePost(post: TimelinePost, content: string): Promise<void> {
@@ -109,8 +101,10 @@ export class TimelineService {
 			const date = this.dateFromPath(file.path);
 			if (!date) return;
 			const source = await this.app.vault.cachedRead(file);
-			const section = this.timelineLines(source);
-			posts.push(...this.parsePosts(section.lines, section.lineOffset, date, file));
+			const heading = `## ${this.getSettings().sectionHeading}`;
+			for (const section of findTimelineSections(source, heading)) {
+				posts.push(...this.parsePosts(section.lines, section.lineOffset, date, file));
+			}
 		}));
 
 		return posts.sort((a, b) => {
@@ -154,21 +148,6 @@ export class TimelineService {
 
 		if (current) posts.push(this.withReplyMetadata(current));
 		return posts;
-	}
-
-	private timelineLines(source: string): { lines: string[]; lineOffset: number } {
-		const heading = `## ${this.getSettings().sectionHeading}`;
-		const lines = source.split(/\r?\n/);
-		const headingIndex = lines.findIndex((line) => line === heading);
-		if (headingIndex < 0) return { lines: [], lineOffset: 0 };
-		const lineOffset = headingIndex + 1;
-		const nextHeading = lines.findIndex(
-			(line, index) => index >= lineOffset && /^##\s/.test(line),
-		);
-		return {
-			lines: lines.slice(lineOffset, nextHeading < 0 ? undefined : nextHeading),
-			lineOffset,
-		};
 	}
 
 	private formatPost(time: string, content: string, blockId: string, replyLink?: string): string {
@@ -231,13 +210,14 @@ export class TimelineService {
 		requireUnchanged: boolean,
 		errorMessage: string,
 	): TimelinePost {
-		const section = this.timelineLines(source);
-		const candidates = this.parsePosts(
-			section.lines,
-			section.lineOffset,
-			post.date,
-			post.file,
-		);
+		const heading = `## ${this.getSettings().sectionHeading}`;
+		const candidates = findTimelineSections(source, heading).flatMap((section) =>
+			this.parsePosts(
+				section.lines,
+				section.lineOffset,
+				post.date,
+				post.file,
+			));
 		const matches = post.blockId
 			? candidates.filter((candidate) => candidate.blockId === post.blockId)
 			: candidates.filter((candidate) => this.hasSameSnapshot(candidate, post));
