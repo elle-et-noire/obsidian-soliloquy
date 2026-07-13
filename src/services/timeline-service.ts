@@ -12,6 +12,11 @@ const REPLY_LINK_PATTERN = /^\[\[[^\]]*#\^([\w-]+)(?:\|[^\]]+)?\]\]$/;
 const TASK_MARKER_PATTERN = /^(\s*[-*+]\s+\[)[ xX](\])/;
 
 export class TimelineService {
+	private readonly postsByFile = new Map<string, TimelinePost[]>();
+	private readonly pendingReads = new Map<string, Promise<TimelinePost[]>>();
+	private readonly fileVersions = new Map<string, number>();
+	private cacheEpoch = 0;
+
 	constructor(
 		private readonly app: App,
 		private readonly getSettings: () => SoliloquySettings,
@@ -20,6 +25,23 @@ export class TimelineService {
 	isDailyNote(file: TFile): boolean {
 		return file.extension === 'md'
 			&& parseDailyNoteDate(file.path, this.getSettings()) !== null;
+	}
+
+	invalidateFile(file: TFile): void {
+		this.invalidatePath(file.path);
+	}
+
+	invalidatePath(path: string): void {
+		this.postsByFile.delete(path);
+		this.pendingReads.delete(path);
+		this.fileVersions.set(path, (this.fileVersions.get(path) ?? 0) + 1);
+	}
+
+	invalidateAll(): void {
+		this.cacheEpoch += 1;
+		this.postsByFile.clear();
+		this.pendingReads.clear();
+		this.fileVersions.clear();
 	}
 
 	async addPost(content: string): Promise<void> {
@@ -42,6 +64,7 @@ export class TimelineService {
 
 		await this.app.vault.process(file, (source) =>
 			appendPostToTimelineSection(source, heading, line));
+		this.invalidateFile(file);
 	}
 
 	async updatePost(post: TimelinePost, content: string): Promise<void> {
@@ -75,6 +98,7 @@ export class TimelineService {
 
 		if (!updatedPost) throw new Error('The post could not be updated.');
 		Object.assign(post, updatedPost);
+		this.invalidateFile(post.file);
 	}
 
 	async updateTask(post: TimelinePost, taskIndex: number, checked: boolean): Promise<void> {
@@ -94,18 +118,13 @@ export class TimelineService {
 	}
 
 	async getPosts(): Promise<TimelinePost[]> {
-		const posts: TimelinePost[] = [];
 		const files = this.app.vault.getMarkdownFiles().filter((file) => this.isDailyNote(file));
+		const currentPaths = new Set(files.map((file) => file.path));
+		for (const path of this.postsByFile.keys()) {
+			if (!currentPaths.has(path)) this.postsByFile.delete(path);
+		}
 
-		await Promise.all(files.map(async (file) => {
-			const date = this.dateFromPath(file.path);
-			if (!date) return;
-			const source = await this.app.vault.cachedRead(file);
-			const heading = `## ${this.getSettings().sectionHeading}`;
-			for (const section of findTimelineSections(source, heading)) {
-				posts.push(...this.parsePosts(section.lines, section.lineOffset, date, file));
-			}
-		}));
+		const posts = (await Promise.all(files.map((file) => this.getFilePosts(file)))).flat();
 
 		return posts.sort((a, b) => {
 			const chronological = `${b.date} ${b.time}`.localeCompare(`${a.date} ${a.time}`);
@@ -113,6 +132,42 @@ export class TimelineService {
 			if (a.file.path === b.file.path) return b.lineStart - a.lineStart;
 			return b.file.path.localeCompare(a.file.path);
 		});
+	}
+
+	private async getFilePosts(file: TFile): Promise<TimelinePost[]> {
+		const cached = this.postsByFile.get(file.path);
+		if (cached) return cached;
+		const pending = this.pendingReads.get(file.path);
+		if (pending) return pending;
+
+		const version = this.fileVersions.get(file.path) ?? 0;
+		const epoch = this.cacheEpoch;
+		const read = this.readFilePosts(file);
+		this.pendingReads.set(file.path, read);
+
+		try {
+			const posts = await read;
+			if (epoch === this.cacheEpoch && version === (this.fileVersions.get(file.path) ?? 0)) {
+				this.postsByFile.set(file.path, posts);
+			}
+			return posts;
+		} finally {
+			if (this.pendingReads.get(file.path) === read) {
+				this.pendingReads.delete(file.path);
+			}
+		}
+	}
+
+	private async readFilePosts(file: TFile): Promise<TimelinePost[]> {
+		const posts: TimelinePost[] = [];
+		const date = this.dateFromPath(file.path);
+		if (!date) return posts;
+		const source = await this.app.vault.cachedRead(file);
+		const heading = `## ${this.getSettings().sectionHeading}`;
+		for (const section of findTimelineSections(source, heading)) {
+			posts.push(...this.parsePosts(section.lines, section.lineOffset, date, file));
+		}
+		return posts;
 	}
 
 	private parsePosts(
@@ -201,6 +256,7 @@ export class TimelineService {
 
 		if (!updatedPost?.blockId) throw new Error('The parent post could not be identified.');
 		Object.assign(post, updatedPost);
+		this.invalidateFile(post.file);
 		return updatedPost.blockId;
 	}
 

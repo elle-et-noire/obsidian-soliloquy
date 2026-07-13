@@ -1,4 +1,5 @@
 import { Plugin, TFile, WorkspaceLeaf } from 'obsidian';
+import { parseDailyNoteDate } from './services/daily-note-path';
 import { TimelineService } from './services/timeline-service';
 import {
 	DEFAULT_SETTINGS,
@@ -10,6 +11,7 @@ import { SOLILOQUY_VIEW_TYPE, SoliloquyView } from './ui/soliloquy-view';
 export default class SoliloquyPlugin extends Plugin {
 	settings!: SoliloquySettings;
 	service!: TimelineService;
+	private refreshTimer?: number;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -37,14 +39,27 @@ export default class SoliloquyPlugin extends Plugin {
 		);
 
 		this.registerEvent(
-			this.app.vault.on('modify', (file) => this.refreshIfDailyNote(file)),
+			this.app.vault.on('modify', (file) => this.scheduleRefreshIfDailyNote(file)),
 		);
 		this.registerEvent(
-			this.app.vault.on('create', (file) => this.refreshIfDailyNote(file)),
+			this.app.vault.on('create', (file) => this.scheduleRefreshIfDailyNote(file)),
 		);
 		this.registerEvent(
-			this.app.vault.on('delete', (file) => this.refreshIfDailyNote(file)),
+			this.app.vault.on('delete', (file) => this.scheduleRefreshIfDailyNote(file)),
 		);
+		this.registerEvent(
+			this.app.vault.on('rename', (file, oldPath) => {
+				const wasDailyNote = parseDailyNoteDate(oldPath, this.settings) !== null;
+				this.service.invalidatePath(oldPath);
+				if (file instanceof TFile) this.service.invalidateFile(file);
+				if (wasDailyNote || (file instanceof TFile && this.service.isDailyNote(file))) {
+					this.scheduleRefresh();
+				}
+			}),
+		);
+		this.register(() => {
+			if (this.refreshTimer !== undefined) window.clearTimeout(this.refreshTimer);
+		});
 	}
 
 	async loadSettings(): Promise<void> {
@@ -57,6 +72,7 @@ export default class SoliloquyPlugin extends Plugin {
 
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
+		this.service.invalidateAll();
 		await this.refreshViews();
 	}
 
@@ -69,10 +85,19 @@ export default class SoliloquyPlugin extends Plugin {
 		await this.app.workspace.revealLeaf(leaf);
 	}
 
-	private refreshIfDailyNote(file: unknown): void {
+	private scheduleRefreshIfDailyNote(file: unknown): void {
 		if (file instanceof TFile && this.service.isDailyNote(file)) {
-			void this.refreshViews();
+			this.service.invalidateFile(file);
+			this.scheduleRefresh();
 		}
+	}
+
+	private scheduleRefresh(): void {
+		if (this.refreshTimer !== undefined) window.clearTimeout(this.refreshTimer);
+		this.refreshTimer = window.setTimeout(() => {
+			this.refreshTimer = undefined;
+			void this.refreshViews();
+		}, 100);
 	}
 
 	private handleGlobalKeydown(event: KeyboardEvent): void {

@@ -22,9 +22,10 @@ const buildResult = await build({
 						export class App {}
 						export class TFile {}
 						export const normalizePath = (path) => path;
-						export const moment = () => {
-							throw new Error('moment is not used by these tests');
-						};
+						export const moment = (value, format) => ({
+							isValid: () => typeof value === 'string',
+							format: (requested) => requested === format ? value : value?.slice(-10),
+						});
 					`,
 					loader: 'js',
 				}));
@@ -256,4 +257,38 @@ test('preserves CRLF line endings when appending a post', () => {
 
 	assert.equal(updated.replaceAll('\r\n', '').includes('\n'), false);
 	assert.match(updated, /## soliloquy\r\n- 12:00 \^sol-new\r\n\tNew post\r\n## next section/);
+});
+
+test('rereads only an invalidated daily note', async () => {
+	const first = { path: 'log/2026/07/2026-07-12.md', extension: 'md' };
+	const second = { path: 'log/2026/07/2026-07-13.md', extension: 'md' };
+	const files = [first, second];
+	const sources = new Map([
+		[first.path, '## soliloquy\n- 09:00 ^sol-first\n\tFirst'],
+		[second.path, '## soliloquy\n- 10:00 ^sol-second\n\tSecond'],
+	]);
+	const reads = new Map();
+	const service = new TimelineService({
+		vault: {
+			getMarkdownFiles: () => files,
+			cachedRead: async (file) => {
+				reads.set(file.path, (reads.get(file.path) ?? 0) + 1);
+				return sources.get(file.path) ?? '';
+			},
+		},
+	}, () => SETTINGS);
+
+	const [initial, concurrent] = await Promise.all([service.getPosts(), service.getPosts()]);
+	assert.equal(initial.length, 2);
+	assert.equal(concurrent.length, 2);
+	assert.equal(reads.get(first.path), 1);
+	assert.equal(reads.get(second.path), 1);
+
+	sources.set(second.path, '## soliloquy\n- 10:00 ^sol-second\n\tUpdated');
+	service.invalidateFile(second);
+	const updated = await service.getPosts();
+
+	assert.equal(updated[0]?.content, 'Updated');
+	assert.equal(reads.get(first.path), 1);
+	assert.equal(reads.get(second.path), 2);
 });
