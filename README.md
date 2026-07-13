@@ -1,92 +1,97 @@
-# Obsidian Sample Plugin
+# Soliloquy
 
-This is a sample plugin for Obsidian (https://obsidian.md).
+Soliloquy is a local-first, timeline-style journal for [Obsidian](https://obsidian.md). Capture short thoughts without leaving the timeline; every post remains ordinary Markdown in your daily notes.
 
-This project uses TypeScript to provide type checking and documentation.
-The repo depends on the latest plugin API (obsidian.d.ts) in TypeScript Definition format, which contains TSDoc comments describing what it does.
+## Features
 
-This sample plugin demonstrates some of the basic functionality the plugin API can do.
+- Write timestamped, multiline posts from a dedicated Obsidian view.
+- Browse posts from all matching daily notes in reverse chronological order.
+- Search dates, times, post text, and replies.
+- Edit posts and check Markdown tasks directly in the timeline.
+- Reply to a post and follow the resulting conversation in a thread view.
+- Open a post or its date in the original daily note.
+- Render Obsidian-flavored Markdown, including links and tags.
+- Use the same vault on desktop and mobile; Soliloquy does not require a network service.
 
-- Adds a ribbon icon, which shows a Notice when clicked.
-- Adds a command "Open modal (simple)" which opens a Modal.
-- Adds a plugin setting tab to the settings page.
-- Registers a global click event and outputs a Notice on click.
-- Registers a global interval which logs 'setInterval' to the console.
+## How posts are stored
 
-## First time developing plugins?
+Soliloquy creates today's note when needed and writes below a configurable level-two heading. With the default settings, a post in `log/2026/07/2026-07-13.md` looks like this:
 
-Quick starting guide for new plugin devs:
+```md
+## soliloquy
 
-- Check if [someone already developed a plugin for what you want](https://obsidian.md/plugins)! There might be an existing plugin similar enough that you can partner up with.
-- Make a copy of this repo as a template with the "Use this template" button (login to GitHub if you don't see it).
-- Clone your repo to a local development folder. For convenience, you can place this folder in your `.obsidian/plugins/your-plugin-name` folder.
-- Install NodeJS, then run `npm i` in the command line under your repo folder.
-- Run `npm run dev` to compile your plugin from `src/main.ts` to `main.js`.
-- Make changes to `src/main.ts` (or create new `.ts` files). Those changes should be automatically compiled into `main.js`.
-- Reload Obsidian to load the new version of your plugin.
-- Enable plugin in settings window.
-- For updates to the Obsidian API run `npm update` in the command line under your repo folder.
-
-## Releasing new releases
-
-- Update your `manifest.json` with your new version number, such as `1.0.1`, and the minimum Obsidian version required for your latest release.
-- Update your `versions.json` file with `"new-plugin-version": "minimum-obsidian-version"` so older versions of Obsidian can download an older version of your plugin that's compatible.
-- Create new GitHub release using your new version number as the "Tag version". Use the exact version number, don't include a prefix `v`. See here for an example: https://github.com/obsidianmd/obsidian-sample-plugin/releases
-- Upload the files `manifest.json`, `main.js`, `styles.css` as binary attachments. Note: The manifest.json file must be in two places, first the root path of your repository and also in the release.
-- Publish the release.
-
-> You can simplify the version bump process by running `npm version patch`, `npm version minor` or `npm version major` after updating `minAppVersion` manually in `manifest.json`.
-> The command will bump version in `manifest.json` and `package.json`, and add the entry for the new version to `versions.json`
-
-## Adding your plugin to the community plugin list
-
-- Check the [plugin guidelines](https://docs.obsidian.md/Plugins/Releasing/Plugin+guidelines).
-- Publish an initial version.
-- Make sure you have a `README.md` file in the root of your repo.
-- Make a pull request at https://github.com/obsidianmd/obsidian-releases to add your plugin.
-
-## How to use
-
-- Clone this repo.
-- Make sure your NodeJS is at least v18 (`node --version`).
-- `npm i` to install dependencies.
-- `npm run dev` to start compilation in watch mode.
-
-## Manually installing the plugin
-
-- Copy over `main.js`, `styles.css`, `manifest.json` to your vault `VaultFolder/.obsidian/plugins/your-plugin-id/`.
-
-## Improve code quality with eslint
-
-- [ESLint](https://eslint.org/) is a tool that analyzes your code to quickly find problems. You can run ESLint against your plugin to find common bugs and ways to improve your code.
-- This project already has eslint preconfigured, you can invoke a check by running`npm run lint`
-- Together with a custom eslint [plugin](https://github.com/obsidianmd/eslint-plugin) for Obsidan specific code guidelines.
-- A GitHub action is preconfigured to automatically lint every commit on all branches.
-
-## Funding URL
-
-You can include funding URLs where people who use your plugin can financially support it.
-
-The simple way is to set the `fundingUrl` field to your link in your `manifest.json` file:
-
-```json
-{
-	"fundingUrl": "https://buymeacoffee.com"
-}
+- 09:41 ^sol-550e8400-e29b-41d4-a716-446655440000
+	A thought captured from the timeline.
+	- [ ] Follow up later
 ```
 
-If you have multiple URLs, you can also do:
+The block ID lets Soliloquy locate a post safely after other lines are inserted. Replies are regular posts containing an Obsidian block link to their parent. You can read and edit the files normally; keep the timestamp line, indentation, and block ID intact if you edit a post by hand.
 
-```json
-{
-	"fundingUrl": {
-		"Buy Me a Coffee": "https://buymeacoffee.com",
-		"GitHub Sponsor": "https://github.com/sponsors",
-		"Patreon": "https://www.patreon.com/"
-	}
-}
+## Usage
+
+1. Select the **Open soliloquy** ribbon icon, or run **Soliloquy: Open timeline** from the command palette.
+2. Enter a post and select the send button. You can also press `Ctrl+Enter` (`Control+Enter` on macOS) while the editor is focused.
+3. Select the search button to filter the timeline. Multiple words are matched together.
+4. Use the reply count to open a thread, or the pencil button to edit a post.
+5. Select a date to open its daily note, or a time to jump to that post in the note.
+
+In a thread, use the back button or `Alt+Left Arrow` to return to the timeline.
+
+## Settings
+
+Open **Settings → Soliloquy** to configure:
+
+- **Daily note folder**: Vault-relative folder containing Soliloquy's daily notes. Default: `log`.
+- **Daily note format**: Moment-style path below that folder. Default: `YYYY/MM/YYYY-MM-DD`.
+- **Timeline heading**: The level-two heading under which posts are stored. Default: `soliloquy`.
+
+The folder and format must describe the same files you want Soliloquy to read. Changing them does not move existing notes.
+
+## Installation
+
+### From Obsidian Community plugins
+
+Once Soliloquy is listed, open **Settings → Community plugins → Browse**, search for “Soliloquy,” then select **Install** and **Enable**.
+
+### Manual installation
+
+1. Download `main.js`, `manifest.json`, and `styles.css` from a release.
+2. Create `<vault>/.obsidian/plugins/soliloquy/`.
+3. Copy the three files into that folder.
+4. Reload Obsidian, then enable **Soliloquy** under **Settings → Community plugins**.
+
+## Privacy
+
+Soliloquy works entirely inside your vault. It does not send network requests, collect analytics, or transmit filenames or note contents. Obsidian Sync and other vault synchronization tools operate independently of this plugin.
+
+## Development
+
+Node.js 18 or newer and npm are required.
+
+```bash
+npm install
+npm run dev
 ```
 
-## API Documentation
+Useful checks:
 
-See https://docs.obsidian.md
+```bash
+npm test
+npm run lint
+npm run build
+```
+
+The production build creates `main.js` at the repository root. Generated build output and `node_modules` are not committed.
+
+## Releasing
+
+1. Update the version with `npm version patch`, `npm version minor`, or `npm version major`.
+2. Confirm `package.json`, `manifest.json`, and the new `versions.json` entry agree.
+3. Run the test, lint, and build commands above.
+4. Push a tag matching the version exactly, without a `v` prefix (for example, `0.2.0`).
+
+The release workflow publishes `main.js`, `manifest.json`, and `styles.css` as release assets.
+
+## License
+
+[0BSD](LICENSE)
