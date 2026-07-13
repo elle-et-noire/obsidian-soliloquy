@@ -119,6 +119,6 @@ function closesFence(line: string, fence: CodeFence): boolean {
 	return marker?.[0] === fence.marker && marker.length >= fence.length;
 }
 
-function detectLineEnding(source: string): '\n' | '\r\n' {
+export function detectLineEnding(source: string): '\n' | '\r\n' {
 	return source.match(/\r\n|\n/)?.[0] === '\r\n' ? '\r\n' : '\n';
 }

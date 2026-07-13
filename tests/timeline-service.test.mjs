@@ -111,6 +111,41 @@ test('updates by block ID after external lines shift', async () => {
 	assert.equal(target.lineStart, 7);
 });
 
+test('preserves CRLF line endings when editing a post', async () => {
+	const harness = createHarness([
+		'# Daily note',
+		'## soliloquy',
+		'- 10:00 ^sol-target',
+		'\tTarget',
+		'## next section',
+		'Next content',
+	].join('\r\n'));
+
+	await harness.service.updatePost(post(), 'Updated');
+
+	const updated = harness.getSource();
+	assert.equal(updated.replaceAll('\r\n', '').includes('\n'), false);
+	assert.match(updated, /- 10:00 \^sol-target\r\n\tUpdated\r\n## next section/);
+});
+
+test('preserves CRLF line endings when updating a task', async () => {
+	const harness = createHarness([
+		'# Daily note',
+		'## soliloquy',
+		'- 10:00 ^sol-target',
+		'\t- [ ] Task',
+		'## next section',
+		'Next content',
+	].join('\r\n'));
+	const target = post({ content: '- [ ] Task' });
+
+	await harness.service.updateTask(target, 0, true);
+
+	const updated = harness.getSource();
+	assert.equal(updated.replaceAll('\r\n', '').includes('\n'), false);
+	assert.match(updated, /- 10:00 \^sol-target\r\n\t- \[x\] Task\r\n## next section/);
+});
+
 test('rejects an edit when the current post content changed', async () => {
 	const initialSource = [
 		'## soliloquy',

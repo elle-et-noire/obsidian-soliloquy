@@ -4,6 +4,7 @@ import type { TimelinePost } from '../types';
 import { buildDailyNotePath, parseDailyNoteDate } from './daily-note-path';
 import {
 	appendPostToTimelineSection,
+	detectLineEnding,
 	findTimelineSections,
 } from './timeline-markdown';
 
@@ -297,13 +298,14 @@ export class TimelineService {
 		current: TimelinePost,
 		replacement: string[],
 	): string {
+		const lineEnding = detectLineEnding(source);
 		const lines = source.split(/\r?\n/);
 		lines.splice(
 			current.lineStart,
 			current.lineEnd - current.lineStart,
 			...replacement,
 		);
-		return lines.join('\n');
+		return lines.join(lineEnding);
 	}
 
 	private createBlockId(): string {
