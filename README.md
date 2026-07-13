@@ -87,7 +87,7 @@ The production build creates `main.js` at the repository root. Generated build o
 
 1. Update the version with `npm version patch`, `npm version minor`, or `npm version major`.
 2. Confirm `package.json`, `manifest.json`, and the new `versions.json` entry agree.
-3. Run the test, lint, and build commands above.
+3. Run `npm run validate:version -- <version>`, followed by the test, lint, and build commands above.
 4. Push a tag matching the version exactly, without a `v` prefix (for example, `0.2.0`).
 
 The release workflow publishes `main.js`, `manifest.json`, and `styles.css` as release assets.

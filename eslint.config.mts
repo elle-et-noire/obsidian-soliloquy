@@ -24,6 +24,7 @@ export default defineConfig(
 					allowDefaultProject: [
 						'eslint.config.mts',
 						'manifest.json',
+						'scripts/*.mjs',
 						'tests/*.mjs',
 					],
 				},
@@ -34,7 +35,7 @@ export default defineConfig(
 	},
 	...obsidianmd.configs.recommended,
 	{
-		files: ['tests/*.mjs'],
+		files: ['tests/*.mjs', 'scripts/*.mjs'],
 		languageOptions: {
 			globals: {
 				...globals.node,
