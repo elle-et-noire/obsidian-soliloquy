@@ -1,114 +1,119 @@
-import {
-	Editor,
-	MarkdownView,
-	MarkdownFileInfo,
-	Modal,
-	Notice,
-	Plugin,
-} from 'obsidian';
+import { Plugin, TFile, WorkspaceLeaf } from 'obsidian';
+import { TimelineService } from './services/timeline-service';
 import {
 	DEFAULT_SETTINGS,
-	MyPluginSettings,
-	SampleSettingTab,
+	SoliloquySettingTab,
+	SoliloquySettings,
 } from './settings';
+import { SOLILOQUY_VIEW_TYPE, SoliloquyView } from './ui/soliloquy-view';
 
-// Remember to rename these classes and interfaces!
+export default class SoliloquyPlugin extends Plugin {
+	settings!: SoliloquySettings;
+	service!: TimelineService;
 
-export default class MyPlugin extends Plugin {
-	settings!: MyPluginSettings;
-
-	async onload() {
+	async onload(): Promise<void> {
 		await this.loadSettings();
+		this.service = new TimelineService(this.app, () => this.settings);
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (_evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
+		this.registerView(
+			SOLILOQUY_VIEW_TYPE,
+			(leaf) => new SoliloquyView(leaf, this.service),
+		);
+
+		this.addRibbonIcon('messages-square', 'Open soliloquy', () => {
+			void this.activateView();
 		});
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
-
-		// This adds a simple command that can be triggered anywhere
 		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			},
+			id: 'open-timeline',
+			name: 'Open timeline',
+			callback: () => void this.activateView(),
 		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (
-				editor: Editor,
-				_ctx: MarkdownView | MarkdownFileInfo,
-			) => {
-				editor.replaceSelection('Sample editor command');
-			},
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView =
-					this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
+		this.addSettingTab(new SoliloquySettingTab(this.app, this));
+		this.registerDomEvent(
+			activeWindow,
+			'keydown',
+			(event: KeyboardEvent) => this.handleGlobalKeydown(event),
+			{ capture: true },
+		);
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-				return false;
-			},
-		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(activeDocument, 'click', (_evt: MouseEvent) => {
-			new Notice('Click');
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(
-			window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000),
+		this.registerEvent(
+			this.app.vault.on('modify', (file) => this.refreshIfDailyNote(file)),
+		);
+		this.registerEvent(
+			this.app.vault.on('create', (file) => this.refreshIfDailyNote(file)),
+		);
+		this.registerEvent(
+			this.app.vault.on('delete', (file) => this.refreshIfDailyNote(file)),
 		);
 	}
 
-	onunload() {}
-
-	async loadSettings() {
+	async loadSettings(): Promise<void> {
 		this.settings = Object.assign(
 			{},
 			DEFAULT_SETTINGS,
-			(await this.loadData()) as Partial<MyPluginSettings>,
+			(await this.loadData()) as Partial<SoliloquySettings>,
 		);
 	}
 
-	async saveSettings() {
+	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
-	}
-}
-
-class SampleModal extends Modal {
-	onOpen() {
-		const { contentEl } = this;
-		contentEl.setText('Woah!');
+		await this.refreshViews();
 	}
 
-	onClose() {
-		const { contentEl } = this;
-		contentEl.empty();
+	private async activateView(): Promise<void> {
+		let leaf = this.app.workspace.getLeavesOfType(SOLILOQUY_VIEW_TYPE)[0];
+		if (!leaf) {
+			leaf = this.app.workspace.getLeaf('tab');
+			await leaf.setViewState({ type: SOLILOQUY_VIEW_TYPE, active: true });
+		}
+		await this.app.workspace.revealLeaf(leaf);
+	}
+
+	private refreshIfDailyNote(file: unknown): void {
+		if (file instanceof TFile && this.service.isDailyNote(file)) {
+			void this.refreshViews();
+		}
+	}
+
+	private handleGlobalKeydown(event: KeyboardEvent): void {
+		const isBack = event.altKey
+			&& !event.ctrlKey
+			&& !event.metaKey
+			&& !event.shiftKey
+			&& (event.key === 'ArrowLeft' || event.code === 'ArrowLeft');
+		if (isBack) {
+			const view = this.app.workspace.getActiveViewOfType(SoliloquyView);
+			if (!view?.goBack()) return;
+			event.preventDefault();
+			event.stopImmediatePropagation();
+			return;
+		}
+
+		const isEnter = event.key === 'Enter' || event.code === 'Enter' || event.code === 'NumpadEnter';
+		if (!event.ctrlKey || !isEnter) return;
+
+		const handled = this.app.workspace
+			.getLeavesOfType(SOLILOQUY_VIEW_TYPE)
+			.some((leaf) => {
+				const view = leaf.view;
+				return view instanceof SoliloquyView && view.submitFromShortcut(event.target);
+			});
+		if (!handled) return;
+
+		event.preventDefault();
+		event.stopImmediatePropagation();
+	}
+
+	private async refreshViews(): Promise<void> {
+		await Promise.all(
+			this.app.workspace
+				.getLeavesOfType(SOLILOQUY_VIEW_TYPE)
+				.map((leaf: WorkspaceLeaf) => {
+					const view = leaf.view;
+					return view instanceof SoliloquyView
+						? view.refreshTimeline()
+						: Promise.resolve();
+				}),
+		);
 	}
 }

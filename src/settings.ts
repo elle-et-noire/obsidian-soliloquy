@@ -1,38 +1,54 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
-import MyPlugin from './main';
+import type SoliloquyPlugin from './main';
 
-export interface MyPluginSettings {
-	mySetting: string;
+export interface SoliloquySettings {
+	dailyNoteFolder: string;
+	dailyNoteFormat: string;
+	sectionHeading: string;
 }
 
-export const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default',
+export const DEFAULT_SETTINGS: SoliloquySettings = {
+	dailyNoteFolder: 'log',
+	dailyNoteFormat: 'YYYY/MM/YYYY-MM-DD',
+	sectionHeading: 'soliloquy',
 };
 
-export class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
+export class SoliloquySettingTab extends PluginSettingTab {
+	constructor(app: App, private readonly plugin: SoliloquyPlugin) {
 		super(app, plugin);
-		this.plugin = plugin;
 	}
 
 	display(): void {
-		const { containerEl } = this;
+		this.containerEl.empty();
 
-		containerEl.empty();
-
-		new Setting(containerEl)
-			.setName('Settings #1')
-			.setDesc("It's a secret")
+		new Setting(this.containerEl)
+			.setName('Daily note folder')
+			.setDesc('Vault-relative folder containing daily notes.')
 			.addText((text) =>
-				text
-					.setPlaceholder('Enter your secret')
-					.setValue(this.plugin.settings.mySetting)
-					.onChange(async (value) => {
-						this.plugin.settings.mySetting = value;
-						await this.plugin.saveSettings();
-					}),
+				text.setValue(this.plugin.settings.dailyNoteFolder).onChange(async (value) => {
+					this.plugin.settings.dailyNoteFolder = value.trim().replace(/^\/+|\/+$/g, '');
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(this.containerEl)
+			.setName('Daily note format')
+			.setDesc('Moment-style path below the daily note folder.')
+			.addText((text) =>
+				text.setValue(this.plugin.settings.dailyNoteFormat).onChange(async (value) => {
+					this.plugin.settings.dailyNoteFormat = value.trim();
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(this.containerEl)
+			.setName('Timeline heading')
+			.setDesc('Posts are stored below this level-two heading.')
+			.addText((text) =>
+				text.setValue(this.plugin.settings.sectionHeading).onChange(async (value) => {
+					this.plugin.settings.sectionHeading = value.trim() || 'soliloquy';
+					await this.plugin.saveSettings();
+				}),
 			);
 	}
 }
