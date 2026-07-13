@@ -1,5 +1,9 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
 import type SoliloquyPlugin from './main';
+import {
+	dailyNoteFormatPreview,
+	validateDailyNoteFormat,
+} from './services/daily-note-path';
 
 export interface SoliloquySettings {
 	dailyNoteFolder: string;
@@ -31,15 +35,18 @@ export class SoliloquySettingTab extends PluginSettingTab {
 				}),
 			);
 
-		new Setting(this.containerEl)
+		const formatSetting = new Setting(this.containerEl)
 			.setName('Daily note format')
 			.setDesc('Moment-style path below the daily note folder.')
 			.addText((text) =>
 				text.setValue(this.plugin.settings.dailyNoteFormat).onChange(async (value) => {
-					this.plugin.settings.dailyNoteFormat = value.trim();
+					const format = value.trim();
+					if (!this.updateFormatDescription(formatSetting, format)) return;
+					this.plugin.settings.dailyNoteFormat = format;
 					await this.plugin.saveSettings();
 				}),
 			);
+		this.updateFormatDescription(formatSetting, this.plugin.settings.dailyNoteFormat);
 
 		new Setting(this.containerEl)
 			.setName('Timeline heading')
@@ -50,5 +57,17 @@ export class SoliloquySettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}),
 			);
+	}
+
+	private updateFormatDescription(setting: Setting, format: string): boolean {
+		const error = validateDailyNoteFormat(format);
+		if (error) {
+			setting.setDesc(`Invalid format: ${error}`);
+			return false;
+		}
+
+		const preview = dailyNoteFormatPreview(format);
+		setting.setDesc(`Moment-style path below the daily note folder. Example: ${preview ?? ''}`);
+		return true;
 	}
 }

@@ -1,6 +1,7 @@
-import { App, moment, normalizePath, TFile } from 'obsidian';
+import { App, moment, TFile } from 'obsidian';
 import type { SoliloquySettings } from '../settings';
 import type { TimelinePost } from '../types';
+import { buildDailyNotePath, parseDailyNoteDate } from './daily-note-path';
 
 const POST_PATTERN = /^- (\d{2}:\d{2})(?:\s+\^([\w-]+))?(?:\s+(.+))?\s*$/;
 const REPLY_LINK_PATTERN = /^\[\[[^\]]*#\^([\w-]+)(?:\|[^\]]+)?\]\]$/;
@@ -13,8 +14,8 @@ export class TimelineService {
 	) {}
 
 	isDailyNote(file: TFile): boolean {
-		const folder = normalizePath(this.getSettings().dailyNoteFolder);
-		return file.extension === 'md' && (folder === '' || file.path.startsWith(`${folder}/`));
+		return file.extension === 'md'
+			&& parseDailyNoteDate(file.path, this.getSettings()) !== null;
 	}
 
 	async addPost(content: string): Promise<void> {
@@ -208,14 +209,12 @@ export class TimelineService {
 	}
 
 	private dateFromPath(path: string): string | null {
-		const match = /(\d{4})\/(\d{2})\/(\d{4}-\d{2}-\d{2})\.md$/.exec(path);
-		return match?.[3] ?? null;
+		return parseDailyNoteDate(path, this.getSettings());
 	}
 
 	private async getOrCreateTodayNote(): Promise<TFile> {
 		const settings = this.getSettings();
-		const relativePath = `${moment().format(settings.dailyNoteFormat)}.md`;
-		const path = normalizePath(settings.dailyNoteFolder ? `${settings.dailyNoteFolder}/${relativePath}` : relativePath);
+		const path = buildDailyNotePath(settings);
 		const existing = this.app.vault.getAbstractFileByPath(path);
 		if (existing instanceof TFile) return existing;
 
