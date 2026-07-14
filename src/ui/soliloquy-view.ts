@@ -36,6 +36,7 @@ export class SoliloquyView extends ItemView {
 	private visiblePostCount = TIMELINE_PAGE_SIZE;
 	private renderedTimelineCount = 0;
 	private loadMoreEl?: HTMLElement;
+	private loadingMore = false;
 
 	constructor(leaf: WorkspaceLeaf, private readonly service: TimelineService) {
 		super(leaf);
@@ -45,6 +46,7 @@ export class SoliloquyView extends ItemView {
 			isFocused: (post) => this.focusedPostKey === this.postKey(post),
 			onEdit: (card, post) => this.openEditor(card, post),
 			onFocus: (card, post, scroll) => this.focusPost(card, post, scroll),
+			onMoveFocus: (card, direction) => this.movePostFocus(card, direction),
 			onOpenDate: (post) => {
 				void this.app.workspace.getLeaf('tab').openFile(post.file, { active: true });
 			},
@@ -223,9 +225,10 @@ export class SoliloquyView extends ItemView {
 		button.addEventListener('click', () => void this.loadMorePosts(epoch, button));
 	}
 
-	private async loadMorePosts(epoch: number, button: HTMLButtonElement): Promise<void> {
-		if (epoch !== this.renderEpoch || !this.timelineEl) return;
-		button.disabled = true;
+	private async loadMorePosts(epoch: number, button?: HTMLButtonElement): Promise<void> {
+		if (this.loadingMore || epoch !== this.renderEpoch || !this.timelineEl) return;
+		this.loadingMore = true;
+		if (button) button.disabled = true;
 		const start = this.renderedTimelineCount;
 		const end = Math.min(start + TIMELINE_PAGE_SIZE, this.timelineResults.length);
 		this.loadMoreEl?.remove();
@@ -238,6 +241,7 @@ export class SoliloquyView extends ItemView {
 			this.visiblePostCount = end;
 			this.renderLoadMoreControl(epoch);
 		} finally {
+			this.loadingMore = false;
 			if (epoch === this.renderEpoch) this.timelineEl.setAttribute('aria-busy', 'false');
 		}
 	}
@@ -520,12 +524,54 @@ export class SoliloquyView extends ItemView {
 			?.querySelectorAll('.soliloquy-post.is-focused')
 			.forEach((element) => element.removeClass('is-focused'));
 		card.addClass('is-focused');
+		this.focusCard(card, scroll, 'center');
+	}
+
+	private movePostFocus(card: HTMLElement, direction: -1 | 1): boolean {
+		const cards = this.getRenderedPostCards();
+		const currentIndex = cards.indexOf(card);
+		if (currentIndex < 0) return false;
+
+		const nextCard = cards[currentIndex + direction];
+		if (nextCard) {
+			this.focusCard(nextCard, true, 'nearest');
+			return true;
+		}
+
+		const canLoadMore = direction === 1
+			&& !this.activeThread
+			&& this.renderedTimelineCount < this.timelineResults.length;
+		if (!canLoadMore) return false;
+		if (this.loadingMore) return true;
+
+		const epoch = this.renderEpoch;
+		void this.loadMorePosts(epoch).then(() => {
+			if (epoch !== this.renderEpoch || card.ownerDocument.activeElement !== card) return;
+			const updatedCards = this.getRenderedPostCards();
+			const updatedIndex = updatedCards.indexOf(card);
+			const loadedNextCard = updatedCards[updatedIndex + 1];
+			if (loadedNextCard) this.focusCard(loadedNextCard, true, 'nearest');
+		});
+		return true;
+	}
+
+	private getRenderedPostCards(): HTMLElement[] {
+		return Array.from(
+			this.timelineEl?.querySelectorAll<HTMLElement>('.soliloquy-post[data-post-key]') ?? [],
+		);
+	}
+
+	private focusCard(
+		card: HTMLElement,
+		scroll: boolean,
+		block: ScrollLogicalPosition,
+	): void {
 		card.focus({ preventScroll: true });
 		if (scroll) {
 			const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches
 				? 'auto'
 				: 'smooth';
-			window.requestAnimationFrame(() => card.scrollIntoView({ behavior, block: 'center' }));
+			window.requestAnimationFrame(() => card.scrollIntoView({ behavior, block }));
 		}
 	}
 

@@ -9,6 +9,7 @@ interface PostCardCallbacks {
 	isFocused: (post: TimelinePost) => boolean;
 	onEdit: (card: HTMLElement, post: TimelinePost) => void;
 	onFocus: (card: HTMLElement, post: TimelinePost, scroll: boolean) => void;
+	onMoveFocus: (card: HTMLElement, direction: -1 | 1) => boolean;
 	onOpenDate: (post: TimelinePost) => void;
 	onOpenLink: (destination: string, post: TimelinePost) => void;
 	onOpenPost: (post: TimelinePost) => void;
@@ -53,7 +54,7 @@ export class PostCardRenderer {
 				role: 'article',
 				tabindex: '0',
 				'aria-label': `Post from ${post.date} at ${post.time}. Press Enter to open thread.`,
-				'aria-keyshortcuts': 'Enter',
+				'aria-keyshortcuts': 'ArrowUp ArrowDown Enter',
 			},
 		});
 		card.dataset.postKey = postKey;
@@ -155,9 +156,18 @@ export class PostCardRenderer {
 			if (!this.callbacks.isFocused(post)) this.callbacks.onOpenThread(post);
 		});
 		card.addEventListener('keydown', (event) => {
-			if (event.target !== card || event.key !== 'Enter') return;
-			event.preventDefault();
-			if (!this.callbacks.isFocused(post)) this.callbacks.onOpenThread(post);
+			if (event.target !== card) return;
+			if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+				const direction = event.key === 'ArrowUp' ? -1 : 1;
+				if (!this.callbacks.onMoveFocus(card, direction)) return;
+				event.preventDefault();
+				event.stopPropagation();
+				return;
+			}
+			if (event.key === 'Enter') {
+				event.preventDefault();
+				if (!this.callbacks.isFocused(post)) this.callbacks.onOpenThread(post);
+			}
 		});
 		if (this.callbacks.isFocused(post)) {
 			this.callbacks.onFocus(card, post, context !== 'timeline');
