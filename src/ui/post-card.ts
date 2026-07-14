@@ -153,8 +153,9 @@ export class PostCardRenderer {
 				dragged = false;
 				return;
 			}
-			if (!this.callbacks.isFocused(post)) this.callbacks.onOpenThread(post);
+			if (context !== 'root') this.callbacks.onOpenThread(post);
 		});
+		card.addEventListener('focus', () => this.callbacks.onFocus(card, post, false));
 		card.addEventListener('keydown', (event) => {
 			if (event.target !== card) return;
 			if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
@@ -166,7 +167,7 @@ export class PostCardRenderer {
 			}
 			if (event.key === 'Enter') {
 				event.preventDefault();
-				if (!this.callbacks.isFocused(post)) this.callbacks.onOpenThread(post);
+				if (context !== 'root') this.callbacks.onOpenThread(post);
 			}
 		});
 		if (this.callbacks.isFocused(post)) {

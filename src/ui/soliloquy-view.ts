@@ -16,6 +16,10 @@ export const SOLILOQUY_VIEW_TYPE = 'soliloquy-timeline';
 const TIMELINE_PAGE_SIZE = 50;
 const RENDER_BATCH_SIZE = 8;
 
+type NavigationEntry =
+	| { type: 'timeline'; scrollTop: number; focusedPostKey?: string }
+	| { type: 'thread'; post: TimelinePost };
+
 export class SoliloquyView extends ItemView {
 	private timelineEl?: HTMLElement;
 	private composer?: SoliloquyComposer;
@@ -30,7 +34,8 @@ export class SoliloquyView extends ItemView {
 	private inlineReplyButtonEl?: HTMLButtonElement;
 	private inlineReplyPostKey?: string;
 	private focusedPostKey?: string;
-	private timelineScrollTop?: number;
+	private focusTimelineOnRender = true;
+	private readonly navigationHistory: NavigationEntry[] = [];
 	private renderEpoch = 0;
 	private timelineResults: TimelinePost[] = [];
 	private visiblePostCount = TIMELINE_PAGE_SIZE;
@@ -94,6 +99,7 @@ export class SoliloquyView extends ItemView {
 				'aria-busy': 'false',
 			},
 		});
+		this.registerDomEvent(root, 'keydown', (event) => this.handlePostContainerKeydown(event));
 		await this.refreshTimeline();
 	}
 
@@ -117,7 +123,7 @@ export class SoliloquyView extends ItemView {
 
 	goBack(): boolean {
 		if (!this.activeThread) return false;
-		void this.closeThread();
+		void this.navigateBack();
 		return true;
 	}
 
@@ -142,6 +148,9 @@ export class SoliloquyView extends ItemView {
 					return;
 				}
 				this.activeThread = undefined;
+				this.navigationHistory.length = 0;
+				this.focusedPostKey = undefined;
+				this.focusTimelineOnRender = true;
 			}
 			await this.renderTimeline(epoch);
 		} finally {
@@ -172,11 +181,15 @@ export class SoliloquyView extends ItemView {
 			});
 		this.composer?.updateStats(this.posts, posts.length);
 		this.timelineResults = posts;
+		const focusedPost = posts.find((post) => this.postKey(post) === this.focusedPostKey)
+			?? posts[0];
+		this.focusedPostKey = focusedPost ? this.postKey(focusedPost) : undefined;
 		this.renderedTimelineCount = 0;
 		this.loadMoreEl = undefined;
 		this.postRenderer.clear();
 		this.timelineEl.empty();
 		if (posts.length === 0) {
+			this.focusTimelineOnRender = false;
 			this.timelineEl.createDiv({
 				text: terms.length > 0 ? 'No matching posts.' : 'No posts yet.',
 				cls: 'soliloquy-empty',
@@ -192,7 +205,10 @@ export class SoliloquyView extends ItemView {
 			this.renderedTimelineCount = initialCount;
 			this.renderLoadMoreControl(epoch);
 		} finally {
-			if (epoch === this.renderEpoch) this.timelineEl.setAttribute('aria-busy', 'false');
+			if (epoch === this.renderEpoch) {
+				this.focusTimelineOnRender = false;
+				this.timelineEl.setAttribute('aria-busy', 'false');
+			}
 		}
 	}
 
@@ -262,6 +278,7 @@ export class SoliloquyView extends ItemView {
 
 	private searchForTag(tag: string): void {
 		this.activeThread = undefined;
+		this.navigationHistory.length = 0;
 		this.focusedPostKey = undefined;
 		this.composer?.element.show();
 		this.composer?.searchFor(tag);
@@ -367,8 +384,17 @@ export class SoliloquyView extends ItemView {
 	}
 
 	private async openThread(post: TimelinePost): Promise<void> {
+		if (this.activeThread && this.postKey(this.activeThread) === this.postKey(post)) return;
+		if (this.activeThread) {
+			this.navigationHistory.push({ type: 'thread', post: this.activeThread });
+		} else {
+			this.navigationHistory.push({
+				type: 'timeline',
+				scrollTop: this.contentEl.scrollTop,
+				focusedPostKey: this.focusedPostKey,
+			});
+		}
 		const epoch = ++this.renderEpoch;
-		if (!this.activeThread) this.timelineScrollTop = this.contentEl.scrollTop;
 		this.activeThread = post;
 		this.focusedPostKey = this.postKey(post);
 		await this.renderThreadPage(post, epoch);
@@ -388,12 +414,12 @@ export class SoliloquyView extends ItemView {
 			cls: 'soliloquy-back-button',
 			attr: {
 				type: 'button',
-				'aria-label': 'Back to timeline',
+				'aria-label': 'Back',
 				'aria-keyshortcuts': 'Alt+ArrowLeft',
 			},
 		});
 		setIcon(back, 'arrow-left');
-		back.addEventListener('click', () => void this.closeThread());
+		back.addEventListener('click', () => void this.navigateBack());
 
 		const thread = this.timelineEl.createDiv({ cls: 'soliloquy-thread' });
 		const path = this.findAncestorPath(post);
@@ -412,20 +438,28 @@ export class SoliloquyView extends ItemView {
 		if (epoch !== this.renderEpoch) return;
 	}
 
-	private async closeThread(): Promise<void> {
-		const scrollTop = this.timelineScrollTop;
-		this.timelineScrollTop = undefined;
-		this.activeThread = undefined;
-		this.timelineEl?.removeClass('is-thread-page');
-		this.timelineEl?.setAttribute('role', 'feed');
-		this.timelineEl?.setAttribute('aria-label', 'Soliloquy timeline');
-		await this.renderTimeline();
-		this.focusedPostKey = undefined;
-		if (scrollTop !== undefined) {
-			window.requestAnimationFrame(() => {
-				this.contentEl.scrollTop = scrollTop;
-			});
+	private async navigateBack(): Promise<void> {
+		const epoch = ++this.renderEpoch;
+		let previous = this.navigationHistory.pop();
+		while (previous?.type === 'thread') {
+			const post = this.findCurrentPost(previous.post);
+			if (post) {
+				this.activeThread = post;
+				this.focusedPostKey = this.postKey(post);
+				await this.renderThreadPage(post, epoch);
+				return;
+			}
+			previous = this.navigationHistory.pop();
 		}
+
+		this.activeThread = undefined;
+		this.focusedPostKey = previous?.focusedPostKey;
+		this.focusTimelineOnRender = true;
+		await this.renderTimeline(epoch);
+		if (epoch !== this.renderEpoch || previous?.type !== 'timeline') return;
+		window.requestAnimationFrame(() => {
+			if (epoch === this.renderEpoch) this.contentEl.scrollTop = previous.scrollTop;
+		});
 	}
 
 	private async saveReply(
@@ -438,6 +472,7 @@ export class SoliloquyView extends ItemView {
 			await this.service.addReply(parent, content);
 			if (stayOnTimeline) {
 				this.activeThread = undefined;
+				this.navigationHistory.length = 0;
 			} else {
 				this.activeThread = this.activeThread ?? this.findThreadRoot(parent);
 			}
@@ -524,7 +559,9 @@ export class SoliloquyView extends ItemView {
 			?.querySelectorAll('.soliloquy-post.is-focused')
 			.forEach((element) => element.removeClass('is-focused'));
 		card.addClass('is-focused');
-		this.focusCard(card, scroll, 'center');
+		if (this.activeThread || this.focusTimelineOnRender || card.ownerDocument.activeElement === card) {
+			this.focusCard(card, scroll, 'center');
+		}
 	}
 
 	private movePostFocus(card: HTMLElement, direction: -1 | 1): boolean {
@@ -553,6 +590,19 @@ export class SoliloquyView extends ItemView {
 			if (loadedNextCard) this.focusCard(loadedNextCard, true, 'nearest');
 		});
 		return true;
+	}
+
+	private handlePostContainerKeydown(event: KeyboardEvent): void {
+		if (event.target !== this.contentEl && event.target !== this.timelineEl) return;
+		if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+		const focusedCard = this.timelineEl?.querySelector<HTMLElement>(
+			'.soliloquy-post.is-focused[data-post-key]',
+		);
+		if (!focusedCard) return;
+		const direction = event.key === 'ArrowUp' ? -1 : 1;
+		if (!this.movePostFocus(focusedCard, direction)) return;
+		event.preventDefault();
+		event.stopPropagation();
 	}
 
 	private getRenderedPostCards(): HTMLElement[] {
