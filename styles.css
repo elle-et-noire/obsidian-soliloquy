@@ -81,6 +81,14 @@
 	overflow-y: hidden;
 }
 
+.soliloquy-input,
+.soliloquy-edit-input,
+.soliloquy-reply-input {
+	white-space: pre-wrap;
+	overflow-wrap: normal;
+	word-break: normal;
+}
+
 .soliloquy-input.is-overflowing,
 .soliloquy-edit-input.is-overflowing,
 .soliloquy-reply-input.is-overflowing,
