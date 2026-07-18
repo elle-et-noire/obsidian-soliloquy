@@ -1,3 +1,14 @@
+@font-face {
+	font-family: "Soliloquy backtick";
+	src:
+		local("Noto Sans CJK JP"),
+		local("Noto Sans Mono"),
+		local("Consolas"),
+		local("Menlo");
+	font-weight: 400;
+	unicode-range: U+0060;
+}
+
 .soliloquy-view {
 	--soliloquy-width: 720px;
 	--soliloquy-radius: 12px;
@@ -87,6 +98,7 @@
 	white-space: pre-wrap;
 	overflow-wrap: normal;
 	word-break: normal;
+	line-break: normal;
 }
 
 .soliloquy-input.is-overflowing,
@@ -239,7 +251,7 @@
 .soliloquy-view .soliloquy-search,
 .soliloquy-view .soliloquy-edit-input,
 .soliloquy-view .soliloquy-reply-input {
-	font-family: var(--font-interface);
+	font-family: "Soliloquy backtick", var(--font-interface);
 	font-size: var(--font-ui-small);
 	font-weight: 400;
 	line-height: 1.55;
