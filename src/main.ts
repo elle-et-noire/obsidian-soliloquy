@@ -126,6 +126,7 @@ export default class SoliloquyPlugin extends Plugin {
 	}
 
 	private handleGlobalKeydown(event: KeyboardEvent): void {
+		if (event.isComposing) return;
 		const isBack = event.altKey
 			&& !event.ctrlKey
 			&& !event.metaKey

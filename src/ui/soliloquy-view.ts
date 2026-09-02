@@ -9,6 +9,7 @@ import type { TimelineService } from '../services/timeline-service';
 import { TimelineIndex } from '../services/timeline-index';
 import type { TimelinePost } from '../types';
 import { resizeTextarea, SoliloquyComposer } from './composer';
+import { captureFocusWithin, shouldRestoreFocusWithin } from './focus-preservation';
 import { PostCardRenderer, type PostContext } from './post-card';
 
 export const SOLILOQUY_VIEW_TYPE = 'soliloquy-timeline';
@@ -34,7 +35,6 @@ export class SoliloquyView extends ItemView {
 	private inlineReplyButtonEl?: HTMLButtonElement;
 	private inlineReplyPostKey?: string;
 	private focusedPostKey?: string;
-	private focusTimelineOnRender = true;
 	private readonly navigationHistory: NavigationEntry[] = [];
 	private renderEpoch = 0;
 	private timelineResults: TimelinePost[] = [];
@@ -50,7 +50,7 @@ export class SoliloquyView extends ItemView {
 			getPostKey: (post) => this.postKey(post),
 			isFocused: (post) => this.focusedPostKey === this.postKey(post),
 			onEdit: (card, post) => this.openEditor(card, post),
-			onFocus: (card, post, scroll) => this.focusPost(card, post, scroll),
+			onFocus: (card, post) => this.focusPost(card, post),
 			onMoveFocus: (card, direction) => this.movePostFocus(card, direction),
 			onOpenDate: (post) => {
 				void this.app.workspace.getLeaf('tab').openFile(post.file, { active: true });
@@ -129,6 +129,7 @@ export class SoliloquyView extends ItemView {
 
 	async refreshTimeline(): Promise<void> {
 		if (!this.timelineEl) return;
+		const previousTimelineFocus = captureFocusWithin(this.timelineEl);
 		const epoch = ++this.renderEpoch;
 		this.timelineEl.setAttribute('aria-busy', 'true');
 		this.editing = undefined;
@@ -144,15 +145,14 @@ export class SoliloquyView extends ItemView {
 				const current = this.findCurrentPost(this.activeThread);
 				if (current) {
 					this.activeThread = current;
-					await this.renderThreadPage(current, epoch);
+					await this.renderThreadPage(current, epoch, previousTimelineFocus);
 					return;
 				}
 				this.activeThread = undefined;
 				this.navigationHistory.length = 0;
 				this.focusedPostKey = undefined;
-				this.focusTimelineOnRender = true;
 			}
-			await this.renderTimeline(epoch);
+			await this.renderTimeline(epoch, false, previousTimelineFocus);
 		} finally {
 			if (epoch === this.renderEpoch) this.timelineEl.setAttribute('aria-busy', 'false');
 		}
@@ -161,6 +161,7 @@ export class SoliloquyView extends ItemView {
 	private async renderTimeline(
 		epoch = ++this.renderEpoch,
 		resetVisiblePosts = false,
+		previousTimelineFocus: Element | null = null,
 	): Promise<void> {
 		if (!this.timelineEl) return;
 		this.timelineEl.setAttribute('aria-busy', 'true');
@@ -189,7 +190,6 @@ export class SoliloquyView extends ItemView {
 		this.postRenderer.clear();
 		this.timelineEl.empty();
 		if (posts.length === 0) {
-			this.focusTimelineOnRender = false;
 			this.timelineEl.createDiv({
 				text: terms.length > 0 ? 'No matching posts.' : 'No posts yet.',
 				cls: 'soliloquy-empty',
@@ -204,9 +204,9 @@ export class SoliloquyView extends ItemView {
 			if (epoch !== this.renderEpoch) return;
 			this.renderedTimelineCount = initialCount;
 			this.renderLoadMoreControl(epoch);
+			this.restoreRenderedPostFocus(previousTimelineFocus, false);
 		} finally {
 			if (epoch === this.renderEpoch) {
-				this.focusTimelineOnRender = false;
 				this.timelineEl.setAttribute('aria-busy', 'false');
 			}
 		}
@@ -385,6 +385,7 @@ export class SoliloquyView extends ItemView {
 
 	private async openThread(post: TimelinePost): Promise<void> {
 		if (this.activeThread && this.postKey(this.activeThread) === this.postKey(post)) return;
+		const previousTimelineFocus = captureFocusWithin(this.timelineEl!);
 		if (this.activeThread) {
 			this.navigationHistory.push({ type: 'thread', post: this.activeThread });
 		} else {
@@ -397,10 +398,18 @@ export class SoliloquyView extends ItemView {
 		const epoch = ++this.renderEpoch;
 		this.activeThread = post;
 		this.focusedPostKey = this.postKey(post);
-		await this.renderThreadPage(post, epoch);
+		await this.renderThreadPage(
+			post,
+			epoch,
+			previousTimelineFocus ?? this.contentEl.ownerDocument.body,
+		);
 	}
 
-	private async renderThreadPage(post: TimelinePost, epoch: number): Promise<void> {
+	private async renderThreadPage(
+		post: TimelinePost,
+		epoch: number,
+		previousTimelineFocus: Element | null = null,
+	): Promise<void> {
 		if (!this.timelineEl) return;
 		this.closeInlineReply(false);
 		this.composer?.element.hide();
@@ -436,9 +445,11 @@ export class SoliloquyView extends ItemView {
 		visited.add(this.postKey(post));
 		await this.renderDescendants(thread, selectedNode, post, epoch, visited);
 		if (epoch !== this.renderEpoch) return;
+		this.restoreRenderedPostFocus(previousTimelineFocus, true);
 	}
 
 	private async navigateBack(): Promise<void> {
+		const previousTimelineFocus = captureFocusWithin(this.timelineEl!);
 		const epoch = ++this.renderEpoch;
 		let previous = this.navigationHistory.pop();
 		while (previous?.type === 'thread') {
@@ -446,7 +457,7 @@ export class SoliloquyView extends ItemView {
 			if (post) {
 				this.activeThread = post;
 				this.focusedPostKey = this.postKey(post);
-				await this.renderThreadPage(post, epoch);
+				await this.renderThreadPage(post, epoch, previousTimelineFocus);
 				return;
 			}
 			previous = this.navigationHistory.pop();
@@ -454,8 +465,7 @@ export class SoliloquyView extends ItemView {
 
 		this.activeThread = undefined;
 		this.focusedPostKey = previous?.focusedPostKey;
-		this.focusTimelineOnRender = true;
-		await this.renderTimeline(epoch);
+		await this.renderTimeline(epoch, false, previousTimelineFocus);
 		if (epoch !== this.renderEpoch || previous?.type !== 'timeline') return;
 		window.requestAnimationFrame(() => {
 			if (epoch === this.renderEpoch) this.contentEl.scrollTop = previous.scrollTop;
@@ -553,15 +563,12 @@ export class SoliloquyView extends ItemView {
 		);
 	}
 
-	private focusPost(card: HTMLElement, post: TimelinePost, scroll = false): void {
+	private focusPost(card: HTMLElement, post: TimelinePost): void {
 		this.focusedPostKey = this.postKey(post);
 		this.timelineEl
 			?.querySelectorAll('.soliloquy-post.is-focused')
 			.forEach((element) => element.removeClass('is-focused'));
 		card.addClass('is-focused');
-		if (this.activeThread || this.focusTimelineOnRender || card.ownerDocument.activeElement === card) {
-			this.focusCard(card, scroll, 'center');
-		}
 	}
 
 	private movePostFocus(card: HTMLElement, direction: -1 | 1): boolean {
@@ -623,6 +630,17 @@ export class SoliloquyView extends ItemView {
 				: 'smooth';
 			window.requestAnimationFrame(() => card.scrollIntoView({ behavior, block }));
 		}
+	}
+
+	private restoreRenderedPostFocus(
+		previousTimelineFocus: Element | null,
+		scroll: boolean,
+	): void {
+		if (!shouldRestoreFocusWithin(this.contentEl, previousTimelineFocus)) return;
+		const card = this.timelineEl?.querySelector<HTMLElement>(
+			'.soliloquy-post.is-focused[data-post-key]',
+		);
+		if (card) this.focusCard(card, scroll, 'center');
 	}
 
 	private postKey(post: TimelinePost): string {

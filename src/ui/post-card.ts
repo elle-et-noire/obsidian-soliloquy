@@ -8,7 +8,7 @@ interface PostCardCallbacks {
 	getPostKey: (post: TimelinePost) => string;
 	isFocused: (post: TimelinePost) => boolean;
 	onEdit: (card: HTMLElement, post: TimelinePost) => void;
-	onFocus: (card: HTMLElement, post: TimelinePost, scroll: boolean) => void;
+	onFocus: (card: HTMLElement, post: TimelinePost) => void;
 	onMoveFocus: (card: HTMLElement, direction: -1 | 1) => boolean;
 	onOpenDate: (post: TimelinePost) => void;
 	onOpenLink: (destination: string, post: TimelinePost) => void;
@@ -58,6 +58,7 @@ export class PostCardRenderer {
 			},
 		});
 		card.dataset.postKey = postKey;
+		if (this.callbacks.isFocused(post)) card.addClass('is-focused');
 		let dragStart: { x: number; y: number } | undefined;
 		let dragged = false;
 		card.addEventListener('pointerdown', (event) => {
@@ -155,7 +156,7 @@ export class PostCardRenderer {
 			}
 			if (context !== 'root') this.callbacks.onOpenThread(post);
 		});
-		card.addEventListener('focus', () => this.callbacks.onFocus(card, post, false));
+		card.addEventListener('focus', () => this.callbacks.onFocus(card, post));
 		card.addEventListener('keydown', (event) => {
 			if (event.target !== card) return;
 			if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
@@ -170,9 +171,6 @@ export class PostCardRenderer {
 				if (context !== 'root') this.callbacks.onOpenThread(post);
 			}
 		});
-		if (this.callbacks.isFocused(post)) {
-			this.callbacks.onFocus(card, post, context !== 'timeline');
-		}
 	}
 
 	private handleContentClick(event: MouseEvent, post: TimelinePost): void {
