@@ -5,6 +5,7 @@ Soliloquy is a local-first, timeline-style journal for [Obsidian](https://obsidi
 ## Features
 
 - Write timestamped, multiline posts from a dedicated Obsidian view.
+- Open the full timeline in a temporary modal and return to your note when finished.
 - Browse posts from all matching daily notes in reverse chronological order.
 - Search dates, times, post text, and replies.
 - Edit posts and check Markdown tasks directly in the timeline.
@@ -49,7 +50,20 @@ Assign your preferred shortcuts under **Settings → Hotkeys** by searching for 
 | **Soliloquy: Focus search** | Switch to search mode and focus the search input. |
 | **Soliloquy: Focus post composer** | Switch to post mode and focus the post input. |
 
-All three commands open Soliloquy if it is closed. The search and post commands return from a thread to the timeline. Mode changes carry over the input text and selection, just like the search button. No default hotkeys are assigned.
+All three commands open Soliloquy if it is closed, and target the modal while it is open. The search and post commands return from a thread to the timeline. Mode changes carry over the input text and selection, just like the search button. No default hotkeys are assigned.
+
+### Temporary modal
+
+Run **Soliloquy: Open timeline in modal**, or assign it a hotkey under **Settings → Hotkeys**. The modal starts with the post input focused and includes the full timeline, search, threads, replies, and editing. An existing sidebar or tab stays open with its own input and navigation state; both displays use the same daily notes.
+
+- `Ctrl+Enter` posts, replies, or saves an edit. Posting keeps the modal open.
+- In a post, search, edit, or reply text field, the first `Esc` moves focus to the timeline without changing the text. Press `Esc` again to close the modal. IME composition and held-key repeats do not move focus or close the modal.
+- When focus is outside text fields, `/` returns to the last visible text field without inserting a slash. If that field is no longer visible, it focuses the main composer (preserving search mode when returning from search). Inside text fields, `/` is entered normally.
+- Closing returns focus to the original note, preserving its selection and scroll position. Following a date, time, or note link closes the modal and opens that destination instead.
+- Running the modal command again focuses the existing modal rather than opening another one.
+- Background updates wait while a post editor or reply composer is open so that another display's posts do not discard that draft. Saving or cancelling refreshes the timeline.
+
+The close button and clicking outside the modal also close it. Unsubmitted modal text is discarded when it closes.
 
 ## Settings
 

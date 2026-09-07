@@ -5,6 +5,7 @@
 		"module": "ESNext",
 		"target": "ES2021",
 		"strict": true,
+		"allowJs": true,
 		"noImplicitReturns": true,
 		"noFallthroughCasesInSwitch": true,
 		"noUncheckedIndexedAccess": true,
@@ -15,5 +16,5 @@
 		"allowSyntheticDefaultImports": true,
 		"lib": ["ES2021", "DOM"]
 	},
-	"include": ["src/**/*.ts"]
+	"include": ["src/**/*.ts", "scripts/*.mjs", "tests/*.mjs"]
 }

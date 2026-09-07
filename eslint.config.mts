@@ -24,8 +24,6 @@ export default defineConfig(
 					allowDefaultProject: [
 						'eslint.config.mts',
 						'manifest.json',
-						'scripts/*.mjs',
-						'tests/*.mjs',
 					],
 				},
 				tsconfigRootDir: import.meta.dirname,
@@ -44,6 +42,7 @@ export default defineConfig(
 		rules: {
 			'no-unsanitized/method': 'off',
 			'obsidianmd/no-nodejs-modules': 'off',
+			'obsidianmd/no-global-this': 'off',
 			'obsidianmd/prefer-window-timers': 'off',
 		},
 	},

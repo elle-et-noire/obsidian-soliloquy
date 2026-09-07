@@ -9,6 +9,19 @@
 	unicode-range: U+0060;
 }
 
+.modal.soliloquy-modal {
+	width: min(820px, 92vw);
+	height: min(800px, 85vh);
+	max-height: 90vh;
+	padding-bottom: 0;
+}
+
+.soliloquy-modal .modal-content {
+	flex: 1;
+	min-height: 0;
+	margin-bottom: 0;
+}
+
 .soliloquy-view {
 	--soliloquy-width: 720px;
 	--soliloquy-radius: 12px;
