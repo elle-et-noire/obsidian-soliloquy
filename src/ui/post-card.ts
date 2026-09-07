@@ -53,7 +53,7 @@ export class PostCardRenderer {
 			attr: {
 				role: 'article',
 				tabindex: '0',
-				'aria-label': `Post from ${post.date} at ${post.time}. Press Enter to open thread.`,
+				'aria-label': `Post from ${post.date} at ${post.time}.`,
 				'aria-keyshortcuts': 'ArrowUp ArrowDown Enter',
 			},
 		});
