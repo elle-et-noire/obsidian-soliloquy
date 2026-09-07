@@ -13,6 +13,7 @@ import { captureFocusWithin, shouldRestoreFocusWithin } from './focus-preservati
 import { PostCardRenderer, type PostContext } from './post-card';
 
 export const SOLILOQUY_VIEW_TYPE = 'soliloquy-timeline';
+export type SoliloquyFocusTarget = 'view' | 'search' | 'post';
 
 const TIMELINE_PAGE_SIZE = 50;
 const RENDER_BATCH_SIZE = 8;
@@ -86,6 +87,7 @@ export class SoliloquyView extends ItemView {
 		const root = this.contentEl;
 		root.empty();
 		root.addClass('soliloquy-view');
+		root.tabIndex = -1;
 
 		this.composer = new SoliloquyComposer(root, this, {
 			onPost: () => void this.submit(),
@@ -101,6 +103,26 @@ export class SoliloquyView extends ItemView {
 		});
 		this.registerDomEvent(root, 'keydown', (event) => this.handlePostContainerKeydown(event));
 		await this.refreshTimeline();
+	}
+
+	focus(target: SoliloquyFocusTarget = 'view'): void {
+		if (target === 'view') {
+			const card = this.timelineEl?.querySelector<HTMLElement>(
+				'.soliloquy-post.is-focused[data-post-key]',
+			);
+			(card ?? this.contentEl).focus({ preventScroll: true });
+			return;
+		}
+		if (!this.composer) return;
+
+		const wasThread = this.activeThread !== undefined;
+		this.activeThread = undefined;
+		this.navigationHistory.length = 0;
+		this.composer.element.show();
+		const searchMode = target === 'search';
+		const modeChanged = this.composer.isSearching() !== searchMode;
+		// Focusing the current mode must not rebuild the timeline or discard edits.
+		this.composer.setSearchMode(searchMode, wasThread || modeChanged);
 	}
 
 	submitFromShortcut(target: EventTarget | null): boolean {

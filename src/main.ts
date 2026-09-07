@@ -7,7 +7,7 @@ import {
 	SoliloquySettingTab,
 	SoliloquySettings,
 } from './settings';
-import { SOLILOQUY_VIEW_TYPE, SoliloquyView } from './ui/soliloquy-view';
+import { SOLILOQUY_VIEW_TYPE, SoliloquyView, type SoliloquyFocusTarget } from './ui/soliloquy-view';
 
 export default class SoliloquyPlugin extends Plugin {
 	settings!: SoliloquySettings;
@@ -42,6 +42,21 @@ export default class SoliloquyPlugin extends Plugin {
 			id: 'open-timeline',
 			name: 'Open timeline',
 			callback: () => void this.activateView(),
+		});
+		this.addCommand({
+			id: 'focus-view',
+			name: 'Focus view',
+			callback: () => void this.activateView('view'),
+		});
+		this.addCommand({
+			id: 'focus-search',
+			name: 'Focus search',
+			callback: () => void this.activateView('search'),
+		});
+		this.addCommand({
+			id: 'focus-post',
+			name: 'Focus post composer',
+			callback: () => void this.activateView('post'),
 		});
 		this.addSettingTab(new SoliloquySettingTab(this.app, this));
 		this.registerDomEvent(
@@ -101,13 +116,17 @@ export default class SoliloquyPlugin extends Plugin {
 		new Notice('Could not save soliloquy settings.');
 	}
 
-	private async activateView(): Promise<void> {
-		let leaf = this.app.workspace.getLeavesOfType(SOLILOQUY_VIEW_TYPE)[0];
+	private async activateView(target: SoliloquyFocusTarget = 'view'): Promise<void> {
+		const workspace = this.app.workspace;
+		let leaf = workspace.getActiveViewOfType(SoliloquyView)?.leaf
+			?? workspace.getLeavesOfType(SOLILOQUY_VIEW_TYPE)[0];
 		if (!leaf) {
-			leaf = this.app.workspace.getLeaf('tab');
+			leaf = workspace.getRightLeaf(false) ?? workspace.getLeaf('tab');
 			await leaf.setViewState({ type: SOLILOQUY_VIEW_TYPE, active: true });
 		}
-		await this.app.workspace.revealLeaf(leaf);
+		await workspace.revealLeaf(leaf);
+		workspace.setActiveLeaf(leaf, { focus: true });
+		if (leaf.view instanceof SoliloquyView) leaf.view.focus(target);
 	}
 
 	private scheduleRefreshIfDailyNote(file: unknown): void {

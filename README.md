@@ -37,6 +37,20 @@ The block ID lets Soliloquy locate a post safely after other lines are inserted.
 
 In a thread, use the back button or `Alt+Left Arrow` to return to the timeline.
 
+### Sidebar and keyboard shortcuts
+
+Soliloquy opens in the right sidebar by default. You can drag its tab to the left sidebar or the main area; commands reuse the existing view wherever you place it and expand the sidebar when it is collapsed.
+
+Assign your preferred shortcuts under **Settings → Hotkeys** by searching for **Soliloquy**:
+
+| Command | Action |
+| --- | --- |
+| **Soliloquy: Focus view** | Focus the selected post, or the view itself if there is no selected post, while keeping the current mode and thread. |
+| **Soliloquy: Focus search** | Switch to search mode and focus the search input. |
+| **Soliloquy: Focus post composer** | Switch to post mode and focus the post input. |
+
+All three commands open Soliloquy if it is closed. The search and post commands return from a thread to the timeline. Mode changes carry over the input text and selection, just like the search button. No default hotkeys are assigned.
+
 ## Settings
 
 Open **Settings → Soliloquy** to configure:
