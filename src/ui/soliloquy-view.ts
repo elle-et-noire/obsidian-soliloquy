@@ -27,7 +27,7 @@ export class SoliloquyView extends ItemView {
 
 	async onOpen(): Promise<void> {
 		this.panel = this.addChild(new TimelinePanel(this.app, this.contentEl, this.service));
-		if (this.scope) this.panel.registerKeyboard(this.scope);
+		if (this.scope) this.panel.registerKeyboard(this.scope, () => this.leaveDisplay());
 		await this.panel.mount();
 	}
 
@@ -44,5 +44,22 @@ export class SoliloquyView extends ItemView {
 
 	refreshTimeline(): Promise<void> {
 		return this.panel?.refreshTimeline(true) ?? Promise.resolve();
+	}
+
+	private leaveDisplay(): void {
+		const workspace = this.app.workspace;
+		let destination = workspace.getMostRecentLeaf(workspace.rootSplit);
+		if (destination?.view.getViewType() === SOLILOQUY_VIEW_TYPE) destination = null;
+		if (!destination) {
+			workspace.iterateAllLeaves((leaf) => {
+				if (!destination && leaf.getRoot() === workspace.rootSplit
+					&& leaf.view.getViewType() !== SOLILOQUY_VIEW_TYPE) destination = leaf;
+			});
+		}
+		if (destination) workspace.setActiveLeaf(destination, { focus: true });
+		else {
+			const focused = this.contentEl.ownerDocument.activeElement;
+			if (focused && this.contentEl.contains(focused)) (focused as HTMLElement).blur();
+		}
 	}
 }

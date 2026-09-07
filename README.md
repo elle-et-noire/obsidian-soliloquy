@@ -50,14 +50,15 @@ Assign your preferred shortcuts under **Settings → Hotkeys** by searching for 
 | **Soliloquy: Focus search** | Switch to search mode and focus the search input. |
 | **Soliloquy: Focus post composer** | Switch to post mode and focus the post input. |
 
-All three commands open Soliloquy if it is closed, and target the modal while it is open. The search and post commands return from a thread to the timeline. Mode changes carry over the input text and selection, just like the search button. No default hotkeys are assigned.
+All three commands open Soliloquy if it is closed, and target the modal while it is open. The search and post commands return from a thread to the timeline. Switching between search and posting preserves the input text, selection, Vim mode, and undo history, just like the search button. No default hotkeys are assigned.
 
 Sidebar, tab, and modal displays share the same input shortcuts:
 
-- `Esc` in search ends the search and returns to the post input, carrying over the text and selection.
-- `Esc` in a post, edit, or reply input moves focus to the timeline without discarding its text. Use the cancel button to discard an edit or reply. IME composition and held-key repeats do not change focus or close the display.
+- Inputs follow Obsidian's **Settings → Editor → Vim key bindings** setting. New Vim inputs start in Insert mode without a persistent mode indicator. Setting changes apply when an input receives focus again. Custom mappings from other Vim plugins are not automatically inherited.
+- `Esc` inside a post, search, edit, or reply input stays in the editor. With Vim enabled, it exits Insert/Visual mode or cancels a Vim command. Repeated presses never close the display.
+- `Shift+Esc` in search returns to the post input, carrying over the text and selection. In a post, edit, or reply input, it moves focus to the timeline without discarding the draft or selection. Use the cancel button to discard an edit or reply. IME composition and held-key repeats do not change focus or close the display.
 - Outside text fields, `/` returns to the last visible text field without inserting a slash. If that field is no longer visible, it focuses the main composer (preserving search mode when returning from search). Inside text fields, `/` is entered normally.
-- Outside text fields, `Esc` follows Obsidian's standard behavior: a modal closes, while a sidebar stays open and workspace focus returns to a note pane.
+- Outside text fields, either `Esc` or `Shift+Esc` closes a modal. A sidebar or regular tab stays open and focus moves to another main workspace pane; if there is no other pane, focus leaves the Soliloquy content.
 
 ### Temporary modal
 

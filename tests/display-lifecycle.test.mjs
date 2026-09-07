@@ -79,15 +79,15 @@ const { SoliloquyModal, SoliloquyView, TimelinePanel } = await import(
 // Keep real panel keyboard/lifecycle behavior; replace only timeline rendering.
 TimelinePanel.prototype.mount = async function() {
 	const root = this.contentEl;
-	const postInput = createInput(root);
-	const searchInput = createInput(root, 'search');
-	root.firstInput = postInput;
+	const input = createInput(root);
+	root.firstInput = input;
 	this.composer = {
-		postInput, searchInput, searching: false, element: { show() {} },
+		input, searching: false, element: { show() {} },
 		isSearching() { return this.searching; },
 		setSearchMode(enabled) {
 			this.searching = enabled;
-			(enabled ? searchInput : postInput).focus();
+			input.kind = enabled ? 'search' : 'post';
+			input.focus();
 		},
 	};
 	await this.service.getPosts();
@@ -97,7 +97,10 @@ async function harness(kind) {
 	const document = { activeElement: null };
 	const original = { focus(options) { this.options = options; document.activeElement = this; } };
 	original.focus();
-	const app = { document, scope: new Scope() };
+	const app = { document, scope: new Scope(), workspace: {
+		getMostRecentLeaf: () => ({ view: { getViewType: () => 'markdown' } }),
+		setActiveLeaf: () => original.focus(),
+	} };
 	const service = { getPosts: async () => [] };
 	const display = kind === 'modal' ? new SoliloquyModal(app, service, () => {})
 		: new SoliloquyView({ app }, service);
@@ -106,18 +109,21 @@ async function harness(kind) {
 	return { display, panel: display.panel, root: display.contentEl, original, document };
 }
 
-test('both hosts exit search and preserve edit/reply drafts on Escape', async () => {
+test('both hosts exit search on Shift+Escape and preserve edit/reply drafts when leaving inputs', async () => {
 	for (const kind of ['modal', 'sidebar']) {
 		const { display, panel, root } = await harness(kind);
 		display.focus('search');
 		press(display.scope, root);
+		assert.equal(panel.composer.searching, true);
+		assert.equal(root.ownerDocument.activeElement, panel.composer.input);
+		press(display.scope, root, { shiftKey: true });
 		assert.equal(panel.composer.searching, false);
-		assert.equal(root.ownerDocument.activeElement, panel.composer.postInput);
+		assert.equal(root.ownerDocument.activeElement, panel.composer.input);
 		assert.equal(display.closed, undefined);
 		for (const field of ['edit', 'reply']) {
 			const input = createInput(root, field);
 			input.focus();
-			press(display.scope, root);
+			press(display.scope, root, { shiftKey: true });
 			assert.equal(root.ownerDocument.activeElement, root);
 			press(display.scope, root, { key: '/' });
 			assert.equal(root.ownerDocument.activeElement, input);
@@ -126,12 +132,14 @@ test('both hosts exit search and preserve edit/reply drafts on Escape', async ()
 	}
 });
 
-test('modal delegates initial focus, outside-input Escape, and focus restoration to its base class', async () => {
+test('modal retains base initial focus and focus restoration when shared Escape handling closes it', async () => {
 	const { display, panel, root, original, document } = await harness('modal');
-	assert.equal(document.activeElement, panel.composer.postInput);
+	assert.equal(document.activeElement, panel.composer.input);
 	assert.equal(display.shouldRestoreSelection, true);
 	press(display.scope, root);
 	assert.equal(display.closed, undefined);
+	assert.equal(document.activeElement, panel.composer.input);
+	press(display.scope, root, { shiftKey: true });
 	assert.equal(document.activeElement, root);
 	press(display.scope, root);
 	assert.equal(display.closed, true);
@@ -142,14 +150,50 @@ test('modal delegates initial focus, outside-input Escape, and focus restoration
 	assert.equal(display.scope.keys.length, 0);
 });
 
-test('sidebar Escape outside inputs does not close the panel or intercept workspace focus handling', async () => {
-	const { display, panel, root } = await harness('sidebar');
+test('sidebar Escape outside inputs focuses a workspace pane without closing the panel', async () => {
+	const { display, panel, root, original, document } = await harness('sidebar');
 	root.focus();
-	assert.equal(press(display.scope, root).defaultPrevented, false);
+	assert.equal(press(display.scope, root).defaultPrevented, true);
+	assert.equal(document.activeElement, original);
 	assert.equal(panel.loaded, true);
 	await display.onClose();
 	assert.equal(panel.loaded, false);
 	assert.equal(display.scope.keys.length, 0);
+});
+
+test('Shift+Escape outside inputs has the same host behavior as Escape', async () => {
+	for (const kind of ['modal', 'sidebar']) {
+		const { display, panel, root, original, document } = await harness(kind);
+		root.focus();
+		press(display.scope, root, { shiftKey: true });
+		assert.equal(document.activeElement, original);
+		assert.equal(panel.loaded, kind === 'sidebar');
+		if (kind === 'sidebar') await display.onClose();
+	}
+});
+
+test('tab focus skips other Soliloquy panes and blurs if there is no destination', async () => {
+	for (const hasDestination of [false, true]) {
+		const { display, root, original, document } = await harness('sidebar');
+		const workspace = display.app.workspace;
+		workspace.rootSplit = {};
+		const soliloquy = { view: { getViewType: () => 'soliloquy-timeline' }, getRoot: () => workspace.rootSplit };
+		const note = { view: { getViewType: () => 'markdown' }, getRoot: () => workspace.rootSplit };
+		workspace.getMostRecentLeaf = () => soliloquy;
+		workspace.iterateAllLeaves = callback => {
+			callback(soliloquy);
+			if (hasDestination) callback(note);
+		};
+		workspace.setActiveLeaf = (leaf, options) => {
+			assert.equal(leaf, note);
+			assert.deepEqual(options, { focus: true });
+			original.focus();
+		};
+		root.focus();
+		press(display.scope, root);
+		assert.equal(document.activeElement, hasDestination ? original : null);
+		await display.onClose();
+	}
 });
 
 test('following a note link closes the modal without restoring the old focus', async () => {

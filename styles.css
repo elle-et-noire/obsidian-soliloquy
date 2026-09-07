@@ -69,7 +69,7 @@
 	width: 100%;
 	box-sizing: border-box;
 	margin: 0;
-	padding: var(--size-4-2) var(--size-4-3);
+	padding: 0;
 	color: var(--text-normal);
 	background: var(--background-primary);
 	border: 1px solid var(--soliloquy-border);
@@ -79,30 +79,58 @@
 	line-height: 1.55;
 }
 
-.soliloquy-input {
-	height: var(--soliloquy-textarea-height, 36px);
-	min-height: 36px;
-	max-height: 240px;
-	resize: none;
-	overflow-y: hidden;
+.soliloquy-editor .cm-editor {
+	border-radius: inherit;
+	font: inherit;
 }
 
-.soliloquy-search {
-	appearance: none;
-	height: var(--soliloquy-textarea-height, 36px);
-	min-height: 36px;
-	max-height: 240px;
-	resize: none;
-	overflow-y: hidden;
+.soliloquy-editor .cm-editor.cm-focused {
+	outline: none;
 }
 
-.soliloquy-edit-input,
-.soliloquy-reply-input {
-	height: var(--soliloquy-textarea-height, 36px);
-	min-height: 36px;
+.soliloquy-editor .cm-scroller {
 	max-height: 240px;
-	resize: none;
-	overflow-y: hidden;
+	overflow: auto;
+	font: inherit;
+	line-height: 1.55;
+}
+
+.soliloquy-editor .cm-content {
+	min-height: 36px;
+	padding: var(--size-4-2) 0;
+}
+
+.soliloquy-editor .cm-line {
+	padding-inline: var(--size-4-3);
+}
+
+.soliloquy-editor .cm-placeholder {
+	color: var(--text-faint);
+}
+
+.soliloquy-editor .cm-panels {
+	color: var(--text-muted);
+	background: var(--background-secondary);
+	border-color: var(--soliloquy-border);
+	font-size: var(--font-ui-smaller);
+}
+
+.soliloquy-editor .cm-selectionBackground {
+	background: var(--text-selection) !important;
+}
+
+.soliloquy-editor .cm-cursor {
+	border-left-color: var(--interactive-accent);
+}
+
+.soliloquy-editor .cm-editor.cm-focused .cm-fat-cursor {
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent) !important;
+	outline: none;
+}
+
+.soliloquy-editor .cm-editor:not(.cm-focused) .cm-cursorLayer {
+	display: none;
 }
 
 .soliloquy-input,
@@ -114,17 +142,7 @@
 	line-break: normal;
 }
 
-.soliloquy-input.is-overflowing,
-.soliloquy-edit-input.is-overflowing,
-.soliloquy-reply-input.is-overflowing,
-.soliloquy-search.is-overflowing {
-	overflow-y: auto;
-}
-
-.soliloquy-input:focus,
-.soliloquy-edit-input:focus,
-.soliloquy-reply-input:focus,
-.soliloquy-search:focus {
+.soliloquy-editor:focus-within {
 	border-color: var(--interactive-accent);
 	box-shadow: 0 0 0 1px var(--interactive-accent);
 }

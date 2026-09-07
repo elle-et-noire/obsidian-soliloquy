@@ -43,7 +43,9 @@ export function createRoot(ownerDocument = { activeElement: null }) {
 		listeners: new Map(),
 		contains(element) { return element === this || element?.root === this; },
 		matches: () => false,
+		closest: () => null,
 		focus() { ownerDocument.activeElement = this; },
+		blur() { ownerDocument.activeElement = null; },
 		addClass() {},
 		empty() { this.emptied = true; },
 	};
@@ -54,7 +56,9 @@ export function createInput(root, kind = 'post') {
 		root, kind,
 		value: 'Unsaved text', selectionStart: 2, selectionEnd: 7,
 		shown: true,
-		matches(selector) { return selector === '.soliloquy-search' ? kind === 'search' : selector.includes('textarea'); },
+		matches(selector) { return selector === '.soliloquy-search' ? this.kind === 'search' : selector.includes('textarea'); },
+		closest(selector) { return selector === '.soliloquy-search' && this.kind === 'search' ? this : null; },
+		containsTarget(target) { return target === this; },
 		isShown() { return this.shown; },
 		focus() {
 			root.ownerDocument.activeElement = this;

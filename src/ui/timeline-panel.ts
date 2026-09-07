@@ -9,7 +9,8 @@ import {
 import type { TimelineService } from '../services/timeline-service';
 import { TimelineIndex } from '../services/timeline-index';
 import type { TimelinePost } from '../types';
-import { resizeTextarea, SoliloquyComposer } from './composer';
+import { SoliloquyComposer } from './composer';
+import { SoliloquyTextEditor } from './text-editor';
 import { captureFocusWithin, shouldRestoreFocusWithin } from './focus-preservation';
 import { PostCardRenderer, type PostContext } from './post-card';
 import { registerTimelineKeyboard } from './timeline-keyboard';
@@ -29,9 +30,8 @@ export class TimelinePanel extends Component {
 	private readonly postRenderer: PostCardRenderer;
 	private posts: TimelinePost[] = [];
 	private postIndex = new TimelineIndex([]);
-	private editing?: { post: TimelinePost; textarea: HTMLTextAreaElement };
-	private replyTargets = new WeakMap<HTMLTextAreaElement, TimelinePost>();
-	private timelineReplyTargets = new WeakSet<HTMLTextAreaElement>();
+	private readonly editInputs = new Map<SoliloquyTextEditor, TimelinePost>();
+	private replying?: { post: TimelinePost; input: SoliloquyTextEditor; stayOnTimeline: boolean };
 	private activeThread?: TimelinePost;
 	private inlineReplyComposerEl?: HTMLElement;
 	private inlineReplyButtonEl?: HTMLButtonElement;
@@ -85,10 +85,10 @@ export class TimelinePanel extends Component {
 		});
 	}
 
-	registerKeyboard(scope: Scope): void {
+	registerKeyboard(scope: Scope, leaveDisplay: () => void): void {
 		registerTimelineKeyboard(this, scope, this.contentEl, {
 			focus: (target) => this.focus(target),
-			exitSearch: () => this.composer?.setSearchMode(false),
+			leaveDisplay,
 			submit: (target) => this.submitFromShortcut(target),
 			goBack: () => this.goBack(),
 		});
@@ -100,7 +100,7 @@ export class TimelinePanel extends Component {
 		root.addClass('soliloquy-view');
 		root.tabIndex = -1;
 
-		this.composer = new SoliloquyComposer(root, this, {
+		this.composer = new SoliloquyComposer(this.app, root, this, {
 			onPost: () => void this.submit(),
 			onSearchChange: () => void this.renderTimeline(undefined, true),
 		});
@@ -139,19 +139,19 @@ export class TimelinePanel extends Component {
 
 	submitFromShortcut(target: EventTarget | null): boolean {
 		if (this.disposed) return false;
-		if (this.composer && target === this.composer.postInput) {
+		if (this.composer?.input.containsTarget(target) && !this.composer.isSearching()) {
 			void this.submit();
 			return true;
 		}
-		if (this.editing && target === this.editing.textarea) {
-			void this.saveEdit(this.editing.post, this.editing.textarea.value);
-			return true;
+		for (const [input, post] of this.editInputs) {
+			if (input.containsTarget(target)) {
+				void this.saveEdit(post, input.value);
+				return true;
+			}
 		}
-		const replyInput = target as HTMLTextAreaElement | null;
-		if (replyInput) {
-			const parent = this.replyTargets.get(replyInput);
-			if (!parent) return false;
-			void this.saveReply(parent, replyInput.value, this.timelineReplyTargets.has(replyInput));
+		if (this.replying?.input.containsTarget(target)) {
+			const { post, input, stayOnTimeline } = this.replying;
+			void this.saveReply(post, input.value, stayOnTimeline);
 			return true;
 		}
 		return false;
@@ -174,9 +174,7 @@ export class TimelinePanel extends Component {
 			if (epoch !== this.renderEpoch) return;
 			// An editor may have opened while the daily notes were being read.
 			if (preserveDrafts && this.hasOpenEditor()) return;
-			this.editing = undefined;
-			this.replyTargets = new WeakMap<HTMLTextAreaElement, TimelinePost>();
-			this.timelineReplyTargets = new WeakSet<HTMLTextAreaElement>();
+			this.clearEditor();
 			this.posts = posts;
 			this.postIndex = new TimelineIndex(posts);
 			this.composer?.updateStats(this.posts);
@@ -198,7 +196,7 @@ export class TimelinePanel extends Component {
 	}
 
 	private hasOpenEditor(): boolean {
-		return this.editing !== undefined || this.inlineReplyComposerEl !== undefined;
+		return this.editInputs.size > 0 || this.inlineReplyComposerEl !== undefined;
 	}
 
 	private async renderTimeline(
@@ -213,7 +211,7 @@ export class TimelinePanel extends Component {
 		this.timelineEl.removeClass('is-thread-page');
 		this.timelineEl.setAttribute('role', 'feed');
 		this.timelineEl.setAttribute('aria-label', 'Soliloquy timeline');
-		this.editing = undefined;
+		this.clearEditor();
 		if (resetVisiblePosts) this.visiblePostCount = TIMELINE_PAGE_SIZE;
 		const query = this.composer?.getSearchQuery() ?? '';
 		const terms = query.split(/\s+/).filter(Boolean);
@@ -306,14 +304,16 @@ export class TimelinePanel extends Component {
 	}
 
 	private async submit(): Promise<void> {
-		const input = this.composer?.postInput;
+		const input = this.composer?.input;
 		if (!input || !input.value.trim()) return;
+		const submitted = input.value;
 		try {
-			await this.service.addPost(input.value);
+			await this.service.addPost(submitted);
 			if (this.disposed) return;
-			this.composer?.clearPost();
+			const stillPosting = !this.composer?.isSearching() && input.value === submitted;
+			if (stillPosting) this.composer?.clearPost();
 			await this.refreshTimeline();
-			if (!this.disposed) input.focus();
+			if (!this.disposed && stillPosting && !this.composer?.isSearching()) input.focus();
 		} catch (error) {
 			console.error('Soliloquy: failed to save post', error);
 			new Notice('Could not save the post.');
@@ -375,17 +375,12 @@ export class TimelinePanel extends Component {
 		this.inlineReplyButtonEl = button;
 		this.inlineReplyPostKey = postKey;
 		button.setAttribute('aria-expanded', 'true');
-		const textarea = composer.createEl('textarea', {
+		const input = this.addChild(new SoliloquyTextEditor(this.app, composer, {
 			cls: 'soliloquy-reply-input',
-			attr: {
-				rows: '1',
-				placeholder: 'Ctrl + Enter to reply',
-				'aria-label': 'Write a reply',
-				'aria-keyshortcuts': 'Control+Enter',
-			},
-		});
-		this.replyTargets.set(textarea, post);
-		if (stayOnTimeline) this.timelineReplyTargets.add(textarea);
+			placeholder: 'Ctrl + Enter to reply',
+			label: 'Write a reply',
+		}));
+		this.replying = { post, input, stayOnTimeline };
 		const actions = composer.createDiv({ cls: 'soliloquy-inline-reply-actions' });
 		const cancel = actions.createEl('button', {
 			attr: { type: 'button', 'aria-label': 'Cancel reply' },
@@ -397,20 +392,16 @@ export class TimelinePanel extends Component {
 		});
 		submit.disabled = true;
 		setIcon(submit, 'send');
-		textarea.addEventListener('input', () => {
-			resizeTextarea(textarea);
-			submit.disabled = !textarea.value.trim();
-		});
+		input.onChange = () => { submit.disabled = !input.value.trim(); };
 		cancel.addEventListener('click', (event) => {
 			event.stopPropagation();
 			void this.cancelReply();
 		});
 		submit.addEventListener('click', (event) => {
 			event.stopPropagation();
-			void this.saveReply(post, textarea.value, stayOnTimeline);
+			void this.saveReply(post, input.value, stayOnTimeline);
 		});
-		textarea.addEventListener('click', (event) => event.stopPropagation());
-		textarea.focus();
+		input.focus();
 	}
 
 	private async cancelReply(): Promise<void> {
@@ -419,6 +410,8 @@ export class TimelinePanel extends Component {
 	}
 
 	private closeInlineReply(restoreFocus = true): void {
+		if (this.replying) this.removeChild(this.replying.input);
+		this.replying = undefined;
 		const button = this.inlineReplyButtonEl;
 		button?.setAttribute('aria-expanded', 'false');
 		this.inlineReplyComposerEl?.remove();
@@ -458,6 +451,7 @@ export class TimelinePanel extends Component {
 		if (!this.timelineEl) return;
 		this.closeInlineReply(false);
 		this.composer?.element.hide();
+		this.clearEditor();
 		this.postRenderer.clear();
 		this.timelineEl.empty();
 		this.timelineEl.addClass('is-thread-page');
@@ -694,23 +688,24 @@ export class TimelinePanel extends Component {
 	}
 
 	private openEditor(card: HTMLElement, post: TimelinePost): void {
+		for (const input of this.editInputs.keys()) {
+			if (!card.contains(input.element)) continue;
+			this.removeChild(input);
+			this.editInputs.delete(input);
+		}
+		if (this.inlineReplyComposerEl && card.contains(this.inlineReplyComposerEl)) this.closeInlineReply(false);
 		this.focusedPostKey = this.postKey(post);
 		card.empty();
 		card.setAttribute('role', 'group');
 		card.setAttribute('aria-label', `Edit post from ${post.date} at ${post.time}`);
 		card.removeAttribute('aria-keyshortcuts');
-		const textarea = card.createEl('textarea', {
+		const input = this.addChild(new SoliloquyTextEditor(this.app, card, {
 			cls: 'soliloquy-edit-input',
-			attr: {
-				rows: '1',
-				placeholder: 'Ctrl + Enter to save',
-				'aria-label': 'Edit post',
-				'aria-keyshortcuts': 'Control+Enter',
-			},
-		});
-		textarea.value = post.content;
-		resizeTextarea(textarea);
-		this.editing = { post, textarea };
+			placeholder: 'Ctrl + Enter to save',
+			label: 'Edit post',
+			value: post.content,
+		}));
+		this.editInputs.set(input, post);
 		const actions = card.createDiv({ cls: 'soliloquy-edit-actions' });
 		const cancel = actions.createEl('button', {
 			attr: { type: 'button', 'aria-label': 'Cancel edit' },
@@ -722,13 +717,16 @@ export class TimelinePanel extends Component {
 		});
 		setIcon(save, 'check');
 
-		textarea.addEventListener('input', () => {
-			resizeTextarea(textarea);
-			save.disabled = !textarea.value.trim();
-		});
+		save.disabled = !input.value.trim();
+		input.onChange = () => { save.disabled = !input.value.trim(); };
 		cancel.addEventListener('click', () => void this.cancelEdit());
-		save.addEventListener('click', () => void this.saveEdit(post, textarea.value));
-		textarea.focus();
+		save.addEventListener('click', () => void this.saveEdit(post, input.value));
+		input.focus();
+	}
+
+	private clearEditor(): void {
+		for (const input of this.editInputs.keys()) this.removeChild(input);
+		this.editInputs.clear();
 	}
 
 	private async cancelEdit(): Promise<void> {

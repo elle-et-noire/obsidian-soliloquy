@@ -2,12 +2,12 @@ import type { Component, Scope } from 'obsidian';
 
 interface TimelineKeyboardActions {
 	focus: (target: 'post' | 'search') => void;
-	exitSearch: () => void;
+	leaveDisplay: () => void;
 	submit: (target: EventTarget | null) => boolean;
 	goBack: () => boolean;
 }
 
-/** Share input behavior; leave closing and workspace focus to the host scope. */
+/** Share keyboard routing; hosts supply only their final close/focus action. */
 export function registerTimelineKeyboard(
 	owner: Component,
 	scope: Scope,
@@ -15,16 +15,17 @@ export function registerTimelineKeyboard(
 	actions: TimelineKeyboardActions,
 ): void {
 	let lastTextInput: HTMLElement | null = null;
+	let lastInputWasSearch = false;
 	const focusInput = () => {
 		if (lastTextInput && root.contains(lastTextInput) && lastTextInput.isShown()) {
 			lastTextInput.focus();
 		} else {
-			actions.focus(lastTextInput?.matches('.soliloquy-search') ? 'search' : 'post');
+			actions.focus(lastInputWasSearch ? 'search' : 'post');
 		}
 	};
 	const handleKeydown = (event: KeyboardEvent): boolean => {
 		if (event.defaultPrevented) return false;
-		if (handleInputEscape(event, root, actions.exitSearch)
+		if (handleInputEscape(event, root, actions.leaveDisplay, () => actions.focus('post'))
 			|| handleInputSlash(event, root, focusInput)) return true;
 		if (event.isComposing) return false;
 		const isEnter = event.key === 'Enter' || event.code === 'Enter' || event.code === 'NumpadEnter';
@@ -39,7 +40,13 @@ export function registerTimelineKeyboard(
 	};
 	// An exact-key binding returning undefined still blocks the parent in Obsidian.
 	// A wildcard can handle input shortcuts and delegate all other keys normally.
-	const handler = scope.register(null, null, (event) => handleKeydown(event) ? false : undefined);
+	const handler = scope.register(null, null, (event) => {
+		if (handleKeydown(event)) return false;
+		// true stops parent Scope bindings without cancelling the DOM event.
+		// In particular, Modal must not close before CodeMirror receives Escape.
+		if (isEscape(event) && getFocusedTextInput(root)) return true;
+		return undefined;
+	});
 	owner.register(() => {
 		scope.unregister(handler);
 		lastTextInput = null;
@@ -47,35 +54,46 @@ export function registerTimelineKeyboard(
 	owner.registerDomEvent(root, 'keydown', (event) => { handleKeydown(event); }, { capture: true });
 	owner.registerDomEvent(root, 'focusin', () => {
 		const input = getFocusedTextInput(root);
-		if (input) lastTextInput = input;
+		if (input) {
+			lastTextInput = input;
+			lastInputWasSearch = !!input.closest('.soliloquy-search');
+		}
 	});
 }
 
 export function handleInputEscape(
 	event: KeyboardEvent,
 	root: HTMLElement,
-	exitSearch: () => void,
+	leaveDisplay: () => void,
+	focusPost: () => void,
 ): boolean {
-	if (event.key !== 'Escape' || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) {
-		return false;
-	}
+	if (!isEscape(event)) return false;
 	if (event.isComposing || event.repeat) {
 		consumeKey(event);
 		return true;
 	}
 	const input = getFocusedTextInput(root);
-	if (!input) return false;
+	// Plain Escape always belongs to the focused editor, including Vim's
+	// search/Ex prompt. Shift+Escape returns Soliloquy search to posting;
+	// other inputs keep their drafts and move focus to the timeline.
+	if (input && !event.shiftKey) return false;
 	consumeKey(event);
-	if (input.matches('.soliloquy-search')) exitSearch();
-	else root.focus({ preventScroll: true });
+	if (input?.closest('.soliloquy-search')) focusPost();
+	else if (input) root.focus({ preventScroll: true });
+	else leaveDisplay();
 	return true;
 }
 
 export function getFocusedTextInput(root: HTMLElement): HTMLElement | null {
 	const focused = root.ownerDocument.activeElement;
 	return focused && root.contains(focused)
-		&& focused.matches('textarea, input, [contenteditable="true"], [contenteditable=""]')
+		&& (focused.matches('textarea, input, [contenteditable="true"], [contenteditable=""]')
+			|| focused.closest('.soliloquy-editor'))
 		? focused as HTMLElement : null;
+}
+
+function isEscape(event: KeyboardEvent): boolean {
+	return event.key === 'Escape' && !event.ctrlKey && !event.metaKey && !event.altKey;
 }
 
 /** Use slash as a focus shortcut only while the user is not entering text. */

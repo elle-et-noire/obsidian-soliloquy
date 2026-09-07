@@ -21,7 +21,7 @@ function harness() {
 	const search = createInput(root, 'search');
 	const actions = {
 		focus(target) { (target === 'search' ? search : post).focus(); },
-		exitSearch() { post.value = search.value; post.focus(); },
+		leaveDisplay() { root.blur(); },
 		submit: () => false,
 		goBack: () => false,
 	};
@@ -29,12 +29,12 @@ function harness() {
 	return { owner, parent, scope, root, post, search, actions };
 }
 
-test('Escape preserves post, edit, and reply drafts and slash returns to the same selection', () => {
+test('Shift+Escape preserves post/edit/reply drafts and slash returns to the same selection', () => {
 	for (const kind of ['post', 'edit', 'reply']) {
 		const { scope, root } = harness();
 		const input = createInput(root, kind);
 		input.focus();
-		const escape = press(scope, root);
+		const escape = press(scope, root, { shiftKey: true });
 		assert.equal(escape.defaultPrevented, true);
 		assert.equal(root.ownerDocument.activeElement, root);
 		const slash = press(scope, root, { key: '/' });
@@ -45,36 +45,31 @@ test('Escape preserves post, edit, and reply drafts and slash returns to the sam
 	}
 });
 
-test('Escape in search exits search before the host can close or change workspace focus', () => {
-	const { parent, scope, root, post, search } = harness();
+test('Escape reaches the input DOM handler without letting the parent scope close the display', () => {
+	const { parent, scope, root, search } = harness();
 	parent.register([], 'Escape', () => assert.fail('The host must not handle search Escape'));
 	search.focus();
-	press(scope, root);
-	assert.equal(root.ownerDocument.activeElement, post);
-	assert.equal(post.value, search.value);
-});
-
-test('Escape outside inputs reaches the parent scope without a plugin close action', () => {
-	const { parent, scope, root, post } = harness();
-	let nativeEscapes = 0;
-	parent.register([], 'Escape', event => { nativeEscapes++; event.preventDefault(); });
-	post.focus();
-	press(scope, root);
-	assert.equal(nativeEscapes, 0);
-	press(scope, root);
-	assert.equal(nativeEscapes, 1);
-});
-
-test('a sidebar Escape outside inputs remains available to Obsidian workspace handling', () => {
-	const { scope, root } = harness();
-	root.focus();
 	const event = press(scope, root);
 	assert.equal(event.defaultPrevented, false);
 	assert.equal(event.stopped, false);
+	assert.equal(root.ownerDocument.activeElement, search);
+});
+
+test('both outside-input Escape variants call the host action exactly once', () => {
+	for (const shiftKey of [false, true]) {
+		const { parent, scope, root, actions } = harness();
+		let exits = 0;
+		actions.leaveDisplay = () => { exits++; };
+		parent.register(null, 'Escape', () => assert.fail('Must not also invoke the parent'));
+		root.focus();
+		assert.equal(press(scope, root, { shiftKey }).defaultPrevented, true);
+		assert.equal(exits, 1);
+	}
 });
 
 test('IME and held Escape cannot change search, blur inputs, or close the host', () => {
-	for (const overrides of [{ isComposing: true }, { repeat: true }]) {
+	for (const overrides of [{ isComposing: true }, { repeat: true },
+		{ isComposing: true, shiftKey: true }, { repeat: true, shiftKey: true }]) {
 		const { parent, scope, root, search } = harness();
 		parent.register([], 'Escape', () => assert.fail('Must protect from accidental closure'));
 		search.focus();
@@ -88,7 +83,7 @@ test('IME and held Escape cannot change search, blur inputs, or close the host',
 
 test('modified Escape and events already handled elsewhere leave inputs alone', () => {
 	for (const overrides of [{ ctrlKey: true }, { metaKey: true }, { altKey: true },
-		{ shiftKey: true }, { defaultPrevented: true }]) {
+		{ defaultPrevented: true }]) {
 		const { scope, root, search } = harness();
 		search.focus();
 		press(scope, root, overrides);

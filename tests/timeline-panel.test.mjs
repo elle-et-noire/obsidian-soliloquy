@@ -55,14 +55,14 @@ function harness() {
 
 test('another display updating daily notes cannot discard an edit draft', async () => {
 	const { panel, reads, renders } = harness();
-	const draft = { textarea: { value: 'Unsaved edit' } };
-	panel.editing = draft;
+	const draft = { value: 'Unsaved edit' };
+	panel.editInputs.set(draft, {});
 	await panel.refreshTimeline(true);
-	assert.equal(panel.editing, draft);
+	assert.equal(panel.editInputs.has(draft), true);
 	assert.equal(reads(), 0);
 	assert.equal(renders(), 0);
 	await panel.cancelEdit();
-	assert.equal(panel.editing, undefined);
+	assert.equal(panel.editInputs.size, 0);
 	assert.equal(reads(), 1);
 	assert.equal(renders(), 1);
 });
@@ -84,11 +84,11 @@ test('an editor opened during an asynchronous refresh is preserved', async () =>
 	let finishRead;
 	service.getPosts = () => new Promise(resolve => { finishRead = resolve; });
 	const refreshing = panel.refreshTimeline(true);
-	const draft = { textarea: { value: 'Typed during read' } };
-	panel.editing = draft;
+	const draft = { value: 'Typed during read' };
+	panel.editInputs.set(draft, {});
 	finishRead([]);
 	await refreshing;
-	assert.equal(panel.editing, draft);
+	assert.equal(panel.editInputs.has(draft), true);
 	assert.equal(renders(), 0);
 	assert.equal(attributes.get('aria-busy'), 'false');
 });
@@ -117,10 +117,14 @@ test('a save finishing after the modal closes cannot refocus its input', async (
 		return new Promise(resolve => { finishSave = resolve; });
 	};
 	panel.composer = {
-		postInput: { value: 'A submitted post', focus: () => { focused = true; } },
+		input: {
+			value: 'A submitted post', focus: () => { focused = true; },
+			containsTarget(target) { return target === this; },
+		},
 		clearPost: () => { cleared = true; },
+		isSearching: () => false,
 	};
-	assert.equal(panel.submitFromShortcut(panel.composer.postInput), true);
+	assert.equal(panel.submitFromShortcut(panel.composer.input), true);
 	panel.unload();
 	finishSave();
 	await Promise.resolve();

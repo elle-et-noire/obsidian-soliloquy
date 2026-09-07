@@ -1,5 +1,6 @@
-import { Component, moment, setIcon } from 'obsidian';
+import { type App, Component, moment, setIcon } from 'obsidian';
 import type { TimelinePost } from '../types';
+import { SoliloquyTextEditor } from './text-editor';
 
 interface ComposerCallbacks {
 	onPost: () => void;
@@ -10,8 +11,7 @@ const SEARCH_DEBOUNCE_MS = 200;
 
 export class SoliloquyComposer {
 	readonly element: HTMLElement;
-	readonly postInput: HTMLTextAreaElement;
-	readonly searchInput: HTMLTextAreaElement;
+	readonly input: SoliloquyTextEditor;
 	private readonly statsEl: HTMLElement;
 	private readonly searchButton: HTMLButtonElement;
 	private readonly postButton: HTMLButtonElement;
@@ -19,6 +19,7 @@ export class SoliloquyComposer {
 	private searchChangeTimer?: number;
 
 	constructor(
+		app: App,
 		root: HTMLElement,
 		owner: Component,
 		private readonly callbacks: ComposerCallbacks,
@@ -27,24 +28,11 @@ export class SoliloquyComposer {
 			cls: 'soliloquy-composer',
 			attr: { role: 'region', 'aria-label': 'Create or search posts' },
 		});
-		this.postInput = this.element.createEl('textarea', {
+		this.input = owner.addChild(new SoliloquyTextEditor(app, this.element, {
 			cls: 'soliloquy-input',
-			attr: {
-				placeholder: 'Ctrl + Enter to post',
-				rows: '1',
-				'aria-label': 'Write a post',
-				'aria-keyshortcuts': 'Control+Enter',
-			},
-		});
-		this.searchInput = this.element.createEl('textarea', {
-			cls: 'soliloquy-search',
-			attr: {
-				rows: '1',
-				placeholder: 'Search posts',
-				'aria-label': 'Search posts',
-			},
-		});
-		this.searchInput.hide();
+			placeholder: 'Ctrl + Enter to post',
+			label: 'Write a post',
+		}));
 
 		const actions = this.element.createDiv({ cls: 'soliloquy-composer-actions' });
 		this.statsEl = actions.createSpan({
@@ -68,14 +56,10 @@ export class SoliloquyComposer {
 		this.postButton.disabled = true;
 		setIcon(this.postButton, 'send');
 
-		owner.registerDomEvent(this.postInput, 'input', () => {
-			resizeTextarea(this.postInput);
-			this.postButton.disabled = !this.postInput.value.trim();
-		});
-		owner.registerDomEvent(this.searchInput, 'input', () => {
-			resizeTextarea(this.searchInput);
-			this.scheduleSearchChange();
-		});
+		this.input.onChange = () => {
+			this.postButton.disabled = !this.input.value.trim();
+			if (this.searchMode) this.scheduleSearchChange();
+		};
 		owner.registerDomEvent(this.postButton, 'click', () => this.callbacks.onPost());
 		owner.registerDomEvent(this.searchButton, 'click', () => {
 			this.setSearchMode(!this.searchMode);
@@ -88,45 +72,38 @@ export class SoliloquyComposer {
 	}
 
 	getSearchQuery(): string {
-		return this.searchMode ? this.searchInput.value.trim().toLocaleLowerCase() : '';
+		return this.searchMode ? this.input.value.trim().toLocaleLowerCase() : '';
 	}
 
 	clearPost(): void {
-		this.postInput.value = '';
+		this.input.value = '';
 		this.postButton.disabled = true;
-		resizeTextarea(this.postInput);
 	}
 
 	searchFor(value: string): void {
 		this.setSearchMode(true, false);
-		this.searchInput.value = value;
-		resizeTextarea(this.searchInput);
+		this.input.value = value;
 		this.notifySearchChange();
 	}
 
 	setSearchMode(enabled: boolean, notify = true): void {
-		const input = enabled ? this.searchInput : this.postInput;
-		if (enabled !== this.searchMode) {
-			const previousInput = this.searchMode ? this.searchInput : this.postInput;
-			input.value = previousInput.value;
-			input.setSelectionRange(
-				previousInput.selectionStart,
-				previousInput.selectionEnd,
-				previousInput.selectionDirection,
-			);
-		}
+		const changed = enabled !== this.searchMode;
 		this.searchMode = enabled;
 		this.searchButton.toggleClass('is-active', enabled);
 		this.searchButton.setAttribute('aria-pressed', String(enabled));
 		this.searchButton.setAttribute('aria-label', enabled ? 'Close search' : 'Search posts');
 		setIcon(this.searchButton, enabled ? 'x' : 'search');
-		this.postInput.toggle(!enabled);
+		// Keep the same editor and Vim state across both composer modes.
+		this.input.element.toggleClass('soliloquy-input', !enabled);
+		this.input.element.toggleClass('soliloquy-search', enabled);
 		this.postButton.toggle(!enabled);
-		this.postButton.disabled = !this.postInput.value.trim();
-		this.searchInput.toggle(enabled);
+		this.postButton.disabled = !this.input.value.trim();
+		if (changed) this.input.setPresentation(
+			enabled ? 'Search posts' : 'Write a post',
+			enabled ? 'Search posts' : 'Ctrl + Enter to post',
+		);
 
-		resizeTextarea(input);
-		input.focus();
+		this.input.focus();
 		if (notify) this.notifySearchChange();
 	}
 
@@ -177,13 +154,4 @@ export class SoliloquyComposer {
 		setIcon(totalStat, 'messages-square');
 		totalStat.createSpan({ text: String(posts.length) });
 	}
-}
-
-export function resizeTextarea(textarea: HTMLTextAreaElement): void {
-	textarea.setCssProps({ '--soliloquy-textarea-height': 'auto' });
-	const overflowing = textarea.scrollHeight > 240;
-	textarea.setCssProps({
-		'--soliloquy-textarea-height': `${Math.min(textarea.scrollHeight, 240)}px`,
-	});
-	textarea.toggleClass('is-overflowing', overflowing);
 }

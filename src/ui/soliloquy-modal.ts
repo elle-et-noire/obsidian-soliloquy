@@ -26,7 +26,7 @@ export class SoliloquyModal extends Modal {
 		});
 		this.panel = panel;
 		panel.load();
-		panel.registerKeyboard(this.scope);
+		panel.registerKeyboard(this.scope, () => this.close());
 		void panel.mount().catch((error: unknown) => {
 			console.error('Soliloquy: failed to open modal timeline', error);
 			if (this.panel === panel) new Notice('Could not load the timeline.');

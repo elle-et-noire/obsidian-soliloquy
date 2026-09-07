@@ -17,6 +17,9 @@
 	"keywords": [],
 	"license": "0-BSD",
 	"devDependencies": {
+		"@codemirror/commands": "6.8.1",
+		"@codemirror/state": "6.5.0",
+		"@codemirror/view": "6.38.6",
 		"@eslint/js": "^9.39.4",
 		"@types/node": "^22.15.17",
 		"esbuild": "0.25.5",
@@ -24,8 +27,12 @@
 		"eslint-plugin-obsidianmd": "^0.4.0",
 		"globals": "^17.6.0",
 		"jiti": "^2.6.1",
+		"jsdom": "^26.1.0",
 		"obsidian": "^1.13.1",
 		"typescript": "^5.8.3",
 		"typescript-eslint": "^8.59.1"
+	},
+	"dependencies": {
+		"@replit/codemirror-vim": "^6.4.0"
 	}
 }
