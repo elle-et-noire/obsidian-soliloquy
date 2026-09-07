@@ -55,6 +55,7 @@ All three commands open Soliloquy if it is closed, and target the modal while it
 Sidebar, tab, and modal displays share the same input shortcuts:
 
 - Inputs follow Obsidian's **Settings → Editor → Vim key bindings** setting. New Vim inputs start in Insert mode without a persistent mode indicator. Setting changes apply when an input receives focus again. Custom mappings from other Vim plugins are not automatically inherited.
+- In Vim Insert mode, `Tab` indents the current or selected lines and `Shift+Tab` removes one level of indentation. In Normal mode, both keys keep their standard forward/backward focus navigation.
 - `Esc` inside a post, search, edit, or reply input stays in the editor. With Vim enabled, it exits Insert/Visual mode or cancels a Vim command. Repeated presses never close the display.
 - `Shift+Esc` in search returns to the post input, carrying over the text and selection. In a post, edit, or reply input, it moves focus to the timeline without discarding the draft or selection. Use the cancel button to discard an edit or reply. IME composition and held-key repeats do not change focus or close the display.
 - Outside text fields, `/` returns to the last visible text field without inserting a slash. If that field is no longer visible, it focuses the main composer (preserving search mode when returning from search). Inside text fields, `/` is entered normally.

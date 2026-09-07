@@ -65,12 +65,83 @@ function harness(t, enabled = true) {
 
 function press(key, options = {}) {
 	const event = new window.KeyboardEvent('keydown', {
-		key, keyCode: key === 'Escape' ? 27 : key === 'Enter' ? 13 : 0,
+		key, keyCode: key === 'Escape' ? 27 : key === 'Enter' ? 13 : key === 'Tab' ? 9 : 0,
 		bubbles: true, cancelable: true, ...options,
 	});
 	document.activeElement.dispatchEvent(event);
 	return event;
 }
+
+test('Insert-mode Tab and Shift+Tab indent the current line in every input without moving focus', t => {
+	const h = harness(t);
+	for (const cls of ['soliloquy-input', 'soliloquy-search', 'soliloquy-edit-input', 'soliloquy-reply-input']) {
+		const input = h.create(cls);
+		input.focus();
+		input.view.dispatch({ selection: { anchor: 8 } });
+		assert.equal(press('Tab').defaultPrevented, true, cls);
+		assert.equal(input.value, '  alpha beta\nsecond line');
+		assert.equal(input.view.state.selection.main.head, 10);
+		assert.equal(document.activeElement, input.view.contentDOM);
+		assert.equal(getCM(input.view).state.vim.insertMode, true);
+		assert.equal(press('Tab', { shiftKey: true }).defaultPrevented, true);
+		assert.equal(input.value, 'alpha beta\nsecond line');
+		assert.equal(input.view.state.selection.main.head, 8);
+		// An already unindented line must still keep focus in Insert mode.
+		assert.equal(press('Tab', { shiftKey: true }).defaultPrevented, true);
+		assert.equal(input.value, 'alpha beta\nsecond line');
+		assert.equal(document.activeElement, input.view.contentDOM);
+	}
+});
+
+test('Insert-mode indentation handles selected lines and remains undoable through Vim', t => {
+	const h = harness(t);
+	const input = h.create();
+	input.focus();
+	input.view.dispatch({ selection: { anchor: 2, head: input.value.length } });
+	const selection = input.view.state.selection.toJSON();
+	press('Tab');
+	assert.equal(input.value, '  alpha beta\n  second line');
+	press('Tab', { shiftKey: true });
+	assert.equal(input.value, 'alpha beta\nsecond line');
+	assert.deepEqual(input.view.state.selection.toJSON(), selection);
+	press('Tab'); press('Escape'); press('u');
+	assert.equal(input.value, 'alpha beta\nsecond line');
+});
+
+test('Normal-mode Tab and Shift+Tab remain available to native focus navigation', t => {
+	const h = harness(t);
+	let nativeTabs = 0;
+	h.owner.registerDomEvent(document, 'keydown', event => {
+		if (event.key === 'Tab' && !event.defaultPrevented) nativeTabs++;
+	});
+	for (const cls of ['soliloquy-input', 'soliloquy-search', 'soliloquy-edit-input', 'soliloquy-reply-input']) {
+		const input = h.create(cls);
+		input.focus(); press('Escape');
+		const selection = input.view.state.selection.toJSON();
+		assert.equal(press('Tab').defaultPrevented, false, cls);
+		assert.equal(press('Tab', { shiftKey: true }).defaultPrevented, false, cls);
+		assert.equal(input.value, 'alpha beta\nsecond line');
+		assert.deepEqual(input.view.state.selection.toJSON(), selection);
+		assert.equal(getCM(input.view).state.vim.insertMode, false);
+		press('i');
+		assert.equal(press('Tab').defaultPrevented, true);
+		assert.equal(input.value, '  alpha beta\nsecond line');
+	}
+	// jsdom does not perform native Tab navigation; verify both keys reach the host uncancelled.
+	assert.equal(nativeTabs, 8);
+});
+
+test('Tab navigation without Vim is unchanged, including after toggling the setting', t => {
+	const h = harness(t, false);
+	const input = h.create();
+	input.focus();
+	for (const enabled of [false, true, false]) {
+		h.root.focus(); h.config.enabled = enabled; input.focus();
+		assert.equal(press('Tab').defaultPrevented, enabled);
+		assert.equal(press('Tab', { shiftKey: true }).defaultPrevented, enabled);
+		assert.equal(input.value, 'alpha beta\nsecond line');
+	}
+});
 
 test('real Vim edits, selects, cancels pending commands, and undoes inside every input', t => {
 	const h = harness(t);

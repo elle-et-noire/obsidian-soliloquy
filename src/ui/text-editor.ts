@@ -1,6 +1,6 @@
 import { type App, Component } from 'obsidian';
 import { Compartment, EditorState, type Extension } from '@codemirror/state';
-import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import { defaultKeymap, history, historyKeymap, indentLess, indentMore } from '@codemirror/commands';
 import { drawSelection, EditorView, keymap, placeholder } from '@codemirror/view';
 import { getCM, Vim, vim } from '@replit/codemirror-vim';
 
@@ -33,7 +33,15 @@ export class SoliloquyTextEditor extends Component {
 					this.vimConfiguration.of(this.vimEnabled ? vim() : []),
 					history(),
 					drawSelection(),
-					keymap.of([...defaultKeymap, ...historyKeymap]),
+					keymap.of([
+						// Only Insert mode captures Tab; other modes retain native focus navigation.
+						{
+							key: 'Tab',
+							run: (view) => getCM(view)?.state.vim?.insertMode === true && indentMore(view),
+							shift: (view) => getCM(view)?.state.vim?.insertMode === true && indentLess(view),
+						},
+						...defaultKeymap, ...historyKeymap,
+					]),
 					EditorView.lineWrapping,
 					this.presentation.of(editorPresentation(options.label, options.placeholder)),
 					EditorView.updateListener.of((update) => {
