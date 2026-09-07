@@ -3,6 +3,7 @@ import {
 	Component,
 	MarkdownView,
 	Notice,
+	type Scope,
 	setIcon,
 } from 'obsidian';
 import type { TimelineService } from '../services/timeline-service';
@@ -11,6 +12,7 @@ import type { TimelinePost } from '../types';
 import { resizeTextarea, SoliloquyComposer } from './composer';
 import { captureFocusWithin, shouldRestoreFocusWithin } from './focus-preservation';
 import { PostCardRenderer, type PostContext } from './post-card';
+import { registerTimelineKeyboard } from './timeline-keyboard';
 
 export type SoliloquyFocusTarget = 'view' | 'search' | 'post';
 
@@ -80,6 +82,15 @@ export class TimelinePanel extends Component {
 			this.disposed = true;
 			this.renderEpoch++;
 			this.postRenderer.clear();
+		});
+	}
+
+	registerKeyboard(scope: Scope): void {
+		registerTimelineKeyboard(this, scope, this.contentEl, {
+			focus: (target) => this.focus(target),
+			exitSearch: () => this.composer?.setSearchMode(false),
+			submit: (target) => this.submitFromShortcut(target),
+			goBack: () => this.goBack(),
 		});
 	}
 
@@ -389,11 +400,6 @@ export class TimelinePanel extends Component {
 		textarea.addEventListener('input', () => {
 			resizeTextarea(textarea);
 			submit.disabled = !textarea.value.trim();
-		});
-		textarea.addEventListener('keydown', (event) => {
-			if (event.key !== 'Escape') return;
-			event.preventDefault();
-			void this.cancelReply();
 		});
 		cancel.addEventListener('click', (event) => {
 			event.stopPropagation();
@@ -719,11 +725,6 @@ export class TimelinePanel extends Component {
 		textarea.addEventListener('input', () => {
 			resizeTextarea(textarea);
 			save.disabled = !textarea.value.trim();
-		});
-		textarea.addEventListener('keydown', (event) => {
-			if (event.key !== 'Escape') return;
-			event.preventDefault();
-			void this.cancelEdit();
 		});
 		cancel.addEventListener('click', () => void this.cancelEdit());
 		save.addEventListener('click', () => void this.saveEdit(post, textarea.value));

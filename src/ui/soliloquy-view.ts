@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf } from 'obsidian';
+import { ItemView, Scope, WorkspaceLeaf } from 'obsidian';
 import type { TimelineService } from '../services/timeline-service';
 import { TimelinePanel, type SoliloquyFocusTarget } from './timeline-panel';
 
@@ -10,6 +10,7 @@ export class SoliloquyView extends ItemView {
 
 	constructor(leaf: WorkspaceLeaf, private readonly service: TimelineService) {
 		super(leaf);
+		this.scope = new Scope(this.app.scope);
 	}
 
 	getViewType(): string {
@@ -26,6 +27,7 @@ export class SoliloquyView extends ItemView {
 
 	async onOpen(): Promise<void> {
 		this.panel = this.addChild(new TimelinePanel(this.app, this.contentEl, this.service));
+		if (this.scope) this.panel.registerKeyboard(this.scope);
 		await this.panel.mount();
 	}
 
@@ -38,14 +40,6 @@ export class SoliloquyView extends ItemView {
 
 	focus(target: SoliloquyFocusTarget = 'view'): void {
 		this.panel?.focus(target);
-	}
-
-	submitFromShortcut(target: EventTarget | null): boolean {
-		return this.panel?.submitFromShortcut(target) ?? false;
-	}
-
-	goBack(): boolean {
-		return this.panel?.goBack() ?? false;
 	}
 
 	refreshTimeline(): Promise<void> {

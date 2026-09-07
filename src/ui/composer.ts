@@ -76,11 +76,6 @@ export class SoliloquyComposer {
 			resizeTextarea(this.searchInput);
 			this.scheduleSearchChange();
 		});
-		owner.registerDomEvent(this.searchInput, 'keydown', (event) => {
-			if (event.key !== 'Escape') return;
-			event.preventDefault();
-			this.setSearchMode(false);
-		});
 		owner.registerDomEvent(this.postButton, 'click', () => this.callbacks.onPost());
 		owner.registerDomEvent(this.searchButton, 'click', () => {
 			this.setSearchMode(!this.searchMode);

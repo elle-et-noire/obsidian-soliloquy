@@ -52,14 +52,19 @@ Assign your preferred shortcuts under **Settings → Hotkeys** by searching for 
 
 All three commands open Soliloquy if it is closed, and target the modal while it is open. The search and post commands return from a thread to the timeline. Mode changes carry over the input text and selection, just like the search button. No default hotkeys are assigned.
 
+Sidebar, tab, and modal displays share the same input shortcuts:
+
+- `Esc` in search ends the search and returns to the post input, carrying over the text and selection.
+- `Esc` in a post, edit, or reply input moves focus to the timeline without discarding its text. Use the cancel button to discard an edit or reply. IME composition and held-key repeats do not change focus or close the display.
+- Outside text fields, `/` returns to the last visible text field without inserting a slash. If that field is no longer visible, it focuses the main composer (preserving search mode when returning from search). Inside text fields, `/` is entered normally.
+- Outside text fields, `Esc` follows Obsidian's standard behavior: a modal closes, while a sidebar stays open and workspace focus returns to a note pane.
+
 ### Temporary modal
 
 Run **Soliloquy: Open timeline in modal**, or assign it a hotkey under **Settings → Hotkeys**. The modal starts with the post input focused and includes the full timeline, search, threads, replies, and editing. An existing sidebar or tab stays open with its own input and navigation state; both displays use the same daily notes.
 
 - `Ctrl+Enter` posts, replies, or saves an edit. Posting keeps the modal open.
-- In a post, search, edit, or reply text field, the first `Esc` moves focus to the timeline without changing the text. Press `Esc` again to close the modal. IME composition and held-key repeats do not move focus or close the modal.
-- When focus is outside text fields, `/` returns to the last visible text field without inserting a slash. If that field is no longer visible, it focuses the main composer (preserving search mode when returning from search). Inside text fields, `/` is entered normally.
-- Closing returns focus to the original note, preserving its selection and scroll position. Following a date, time, or note link closes the modal and opens that destination instead.
+- Closing uses Obsidian's standard focus restoration. Following a date, time, or note link closes the modal and opens that destination instead.
 - Running the modal command again focuses the existing modal rather than opening another one.
 - Background updates wait while a post editor or reply composer is open so that another display's posts do not discard that draft. Saving or cancelling refreshes the timeline.
 

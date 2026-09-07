@@ -66,12 +66,6 @@ export default class SoliloquyPlugin extends Plugin {
 			callback: () => void this.activateView('post'),
 		});
 		this.addSettingTab(new SoliloquySettingTab(this.app, this));
-		this.registerDomEvent(
-			activeWindow,
-			'keydown',
-			(event: KeyboardEvent) => this.handleGlobalKeydown(event),
-			{ capture: true },
-		);
 
 		this.registerEvent(
 			this.app.vault.on('modify', (file) => this.scheduleRefreshIfDailyNote(file)),
@@ -165,38 +159,6 @@ export default class SoliloquyPlugin extends Plugin {
 			this.refreshTimer = undefined;
 			void this.refreshViews();
 		}, 100);
-	}
-
-	private handleGlobalKeydown(event: KeyboardEvent): void {
-		if (event.isComposing) return;
-		const isBack = event.altKey
-			&& !event.ctrlKey
-			&& !event.metaKey
-			&& !event.shiftKey
-			&& (event.key === 'ArrowLeft' || event.code === 'ArrowLeft');
-		if (isBack) {
-			const view = this.modal ?? this.app.workspace.getActiveViewOfType(SoliloquyView);
-			if (!view?.goBack()) return;
-			event.preventDefault();
-			event.stopImmediatePropagation();
-			return;
-		}
-
-		const isEnter = event.key === 'Enter' || event.code === 'Enter' || event.code === 'NumpadEnter';
-		if (!event.ctrlKey || !isEnter) return;
-
-		const handled = this.modal
-			? this.modal.submitFromShortcut(event.target)
-			: this.app.workspace
-				.getLeavesOfType(SOLILOQUY_VIEW_TYPE)
-				.some((leaf) => {
-					const view = leaf.view;
-					return view instanceof SoliloquyView && view.submitFromShortcut(event.target);
-				});
-		if (!handled) return;
-
-		event.preventDefault();
-		event.stopImmediatePropagation();
 	}
 
 	private async refreshViews(): Promise<void> {
