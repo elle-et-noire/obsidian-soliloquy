@@ -93,7 +93,7 @@ export class SoliloquyComposer {
 	}
 
 	getSearchQuery(): string {
-		return this.searchInput.value.trim().toLocaleLowerCase();
+		return this.searchMode ? this.searchInput.value.trim().toLocaleLowerCase() : '';
 	}
 
 	clearPost(): void {
@@ -103,13 +103,23 @@ export class SoliloquyComposer {
 	}
 
 	searchFor(value: string): void {
+		this.setSearchMode(true, false);
 		this.searchInput.value = value;
 		resizeTextarea(this.searchInput);
-		this.setSearchMode(true, false);
 		this.notifySearchChange();
 	}
 
 	setSearchMode(enabled: boolean, notify = true): void {
+		const input = enabled ? this.searchInput : this.postInput;
+		if (enabled !== this.searchMode) {
+			const previousInput = this.searchMode ? this.searchInput : this.postInput;
+			input.value = previousInput.value;
+			input.setSelectionRange(
+				previousInput.selectionStart,
+				previousInput.selectionEnd,
+				previousInput.selectionDirection,
+			);
+		}
 		this.searchMode = enabled;
 		this.searchButton.toggleClass('is-active', enabled);
 		this.searchButton.setAttribute('aria-pressed', String(enabled));
@@ -117,16 +127,11 @@ export class SoliloquyComposer {
 		setIcon(this.searchButton, enabled ? 'x' : 'search');
 		this.postInput.toggle(!enabled);
 		this.postButton.toggle(!enabled);
+		this.postButton.disabled = !this.postInput.value.trim();
 		this.searchInput.toggle(enabled);
 
-		if (enabled) {
-			resizeTextarea(this.searchInput);
-			this.searchInput.focus();
-		} else {
-			this.searchInput.value = '';
-			resizeTextarea(this.searchInput);
-			this.postInput.focus();
-		}
+		resizeTextarea(input);
+		input.focus();
 		if (notify) this.notifySearchChange();
 	}
 
