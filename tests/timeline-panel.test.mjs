@@ -43,6 +43,7 @@ function harness() {
 	const service = { getPosts: async () => { reads++; return []; } };
 	const root = { ownerDocument: { activeElement: null } };
 	const panel = new TimelinePanel({}, root, service);
+	panel.postRenderer.restoreCard = async () => {};
 	const attributes = new Map();
 	panel.timelineEl = {
 		...root,
@@ -56,13 +57,13 @@ function harness() {
 test('another display updating daily notes cannot discard an edit draft', async () => {
 	const { panel, reads, renders } = harness();
 	const draft = { value: 'Unsaved edit' };
-	panel.editInputs.set(draft, {});
+	panel.editing = { input: draft, post: {} };
 	await panel.refreshTimeline(true);
-	assert.equal(panel.editInputs.has(draft), true);
+	assert.equal(panel.editing.input, draft);
 	assert.equal(reads(), 0);
 	assert.equal(renders(), 0);
 	await panel.cancelEdit();
-	assert.equal(panel.editInputs.size, 0);
+	assert.equal(panel.editing, undefined);
 	assert.equal(reads(), 1);
 	assert.equal(renders(), 1);
 });
@@ -85,10 +86,10 @@ test('an editor opened during an asynchronous refresh is preserved', async () =>
 	service.getPosts = () => new Promise(resolve => { finishRead = resolve; });
 	const refreshing = panel.refreshTimeline(true);
 	const draft = { value: 'Typed during read' };
-	panel.editInputs.set(draft, {});
+	panel.editing = { input: draft, post: {} };
 	finishRead([]);
 	await refreshing;
-	assert.equal(panel.editInputs.has(draft), true);
+	assert.equal(panel.editing.input, draft);
 	assert.equal(renders(), 0);
 	assert.equal(attributes.get('aria-busy'), 'false');
 });
@@ -117,6 +118,7 @@ test('a save finishing after the modal closes cannot refocus its input', async (
 		return new Promise(resolve => { finishSave = resolve; });
 	};
 	panel.composer = {
+		setPosting() {},
 		input: {
 			value: 'A submitted post', focus: () => { focused = true; },
 			containsTarget(target) { return target === this; },

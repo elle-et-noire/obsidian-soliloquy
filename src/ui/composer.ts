@@ -16,6 +16,7 @@ export class SoliloquyComposer {
 	private readonly searchButton: HTMLButtonElement;
 	private readonly postButton: HTMLButtonElement;
 	private searchMode = false;
+	private posting = false;
 	private searchChangeTimer?: number;
 
 	constructor(
@@ -57,7 +58,7 @@ export class SoliloquyComposer {
 		setIcon(this.postButton, 'send');
 
 		this.input.onChange = () => {
-			this.postButton.disabled = !this.input.value.trim();
+			this.postButton.disabled = this.posting || !this.input.value.trim();
 			if (this.searchMode) this.scheduleSearchChange();
 		};
 		owner.registerDomEvent(this.postButton, 'click', () => this.callbacks.onPost());
@@ -80,6 +81,12 @@ export class SoliloquyComposer {
 		this.postButton.disabled = true;
 	}
 
+	setPosting(posting: boolean): void {
+		this.posting = posting;
+		this.postButton.disabled = posting || !this.input.value.trim();
+		this.postButton.setAttribute('aria-busy', String(posting));
+	}
+
 	searchFor(value: string): void {
 		this.setSearchMode(true, false);
 		this.input.value = value;
@@ -97,7 +104,7 @@ export class SoliloquyComposer {
 		this.input.element.toggleClass('soliloquy-input', !enabled);
 		this.input.element.toggleClass('soliloquy-search', enabled);
 		this.postButton.toggle(!enabled);
-		this.postButton.disabled = !this.input.value.trim();
+		this.postButton.disabled = this.posting || !this.input.value.trim();
 		if (changed) this.input.setPresentation(
 			enabled ? 'Search posts' : 'Write a post',
 			enabled ? 'Search posts' : 'Ctrl + Enter to post',

@@ -22,6 +22,8 @@ const result = await build({
 		export { SoliloquyTextEditor } from './src/ui/text-editor';
 		export { SoliloquyComposer } from './src/ui/composer';
 		export { TimelinePanel } from './src/ui/timeline-panel';
+		export { PostCardRenderer } from './src/ui/post-card';
+		export { MarkdownRenderer } from './tests/editor-dom-harness.mjs';
 		export { registerTimelineKeyboard } from './src/ui/timeline-keyboard';
 		export { getCM } from '@replit/codemirror-vim';
 	`, resolveDir: process.cwd() },
@@ -30,7 +32,7 @@ const result = await build({
 });
 const source = result.outputFiles[0]?.text;
 if (!source) throw new Error('Editor test bundle was not generated.');
-const { SoliloquyTextEditor, SoliloquyComposer, TimelinePanel, registerTimelineKeyboard, getCM } = await import(
+const { SoliloquyTextEditor, SoliloquyComposer, TimelinePanel, PostCardRenderer, MarkdownRenderer, registerTimelineKeyboard, getCM } = await import(
 	`data:text/javascript;base64,${Buffer.from(source + '\n//# sourceURL=soliloquy-editor-tests.js').toString('base64')}`
 );
 
@@ -365,7 +367,7 @@ test('Ctrl+Enter routes real editor descendants to post, edit, and reply actions
 	for (const field of ['post', 'edit', 'reply']) {
 		const input = h.create();
 		if (field === 'post') panel.composer = { input, isSearching: () => false };
-		if (field === 'edit') panel.editInputs.set(input, post);
+		if (field === 'edit') panel.editing = { input, post };
 		if (field === 'reply') panel.replying = { post, input, stayOnTimeline: true };
 		input.focus();
 		press('Enter', { ctrlKey: true });
@@ -392,31 +394,221 @@ test('IME and held escape keys never leave the input or trigger the host action'
 	assert.equal(h.exits(), 0);
 });
 
-test('inline editors stay usable across cards and are destroyed when their UI is removed', t => {
-	const h = harness(t);
-	const panel = h.owner.addChild(new TimelinePanel(h.app, h.root, {}));
-	const post = { blockId: 'test', content: 'Saved post', date: '2026-09-07', time: '12:00' };
-	const firstCard = h.root.createDiv();
-	const secondCard = h.root.createDiv();
-	panel.openEditor(firstCard, post);
-	const first = [...panel.editInputs.keys()][0];
-	first.value = 'First draft';
-	panel.openEditor(secondCard, { ...post, blockId: 'second' });
-	const second = [...panel.editInputs.keys()][1];
-	assert.equal(panel.editInputs.size, 2);
-	first.focus(); press('Escape'); press('d'); press('d');
-	assert.equal(first.value, '');
-	assert.equal(second.value, 'Saved post');
-	panel.clearEditor();
-	assert.equal(panel.editInputs.size, 0);
+async function panelHarness(t) {
+	const h = harness(t, false);
+	const posts = ['first', 'second'].map(blockId => ({
+		blockId, content: `Saved ${blockId}`, date: '2026-09-07', time: '12:00',
+		file: { path: 'daily.md' }, lineStart: 0, lineEnd: 2,
+	}));
+	const service = {
+		getPosts: async () => posts.map(post => ({ ...post })),
+		updatePost: async () => {}, addPost: async () => {}, addReply: async () => {},
+	};
+	const panel = h.owner.addChild(new TimelinePanel(h.app, h.root, service));
+	h.actions.submit = target => panel.submitFromShortcut(target);
+	h.actions.focus = target => panel.focus(target);
+	await panel.mount();
+	const card = id => h.root.querySelector(`[data-post-key="${id}"]`);
+	const edit = id => card(id).querySelector('.soliloquy-edit-button').click();
+	const reply = id => card(id).querySelector('.soliloquy-reply-button').click();
+	return { ...h, panel, service, posts, card, edit, reply };
+}
+
+const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test('switching between edits and replies cancels the old field without removing or refocusing the new field', async t => {
+	const h = await panelHarness(t);
+	h.edit('first');
+	const first = h.panel.editing.input;
+	first.value = 'Discard me';
+	h.edit('second');
+	const second = h.panel.editing.input;
+	second.value = 'Second draft';
+	await settle();
 	assert.equal(first.view.destroyed, true);
+	assert.equal(h.card('first').querySelector('.soliloquy-post-content').textContent, 'Saved first');
+	assert.equal(h.root.querySelectorAll('.soliloquy-edit-input').length, 1);
+	assert.equal(second.value, 'Second draft');
+	assert.equal(document.activeElement, second.view.contentDOM);
+	h.reply('first');
+	const reply = h.panel.replying.input;
+	await settle();
 	assert.equal(second.view.destroyed, true);
-	const button = firstCard.createEl('button');
-	panel.openInlineReply(firstCard, button, post, true);
-	const reply = panel.replying.input;
-	panel.closeInlineReply(false);
+	assert.equal(h.panel.editing, undefined);
+	assert.equal(document.activeElement, reply.view.contentDOM);
+	h.edit('second');
+	await settle();
 	assert.equal(reply.view.destroyed, true);
-	assert.equal(panel.children.size, 0);
+	assert.equal(h.panel.replying, undefined);
+	assert.equal(h.root.querySelectorAll('.soliloquy-edit-input').length, 1);
+});
+
+test('another text field cancels an edit or reply while buttons, timeline and the same Vim prompt keep it', async t => {
+	const h = await panelHarness(t);
+	for (const kind of ['edit', 'reply']) {
+		for (const destination of ['composer', 'search', 'note']) {
+			h[kind]('first');
+			const draft = kind === 'edit' ? h.panel.editing : h.panel.replying;
+			draft.input.value = 'Draft';
+			draft.button.focus();
+			assert.equal(draft.input.view.destroyed, false);
+			h.root.focus();
+			assert.equal(draft.input.view.destroyed, false);
+			const prompt = draft.input.element.createEl('input');
+			prompt.focus();
+			assert.equal(draft.input.view.destroyed, false);
+			let target;
+			if (destination === 'note') {
+				target = document.body.createDiv({ attr: { contenteditable: 'true' } });
+				target.focus();
+			} else {
+				h.panel.focus(destination === 'search' ? 'search' : 'post');
+				target = h.panel.composer.input.view.contentDOM;
+			}
+			assert.equal(draft.input.view.destroyed, true);
+			await settle();
+			assert.equal(h.panel.editing, undefined);
+			assert.equal(h.panel.replying, undefined);
+			assert.equal(document.activeElement, target);
+			if (destination === 'note') target.remove();
+		}
+	}
+});
+
+test('slow post/edit/reply saves reject repeated clicks and shortcuts; failures allow retry', async t => {
+	const h = await panelHarness(t);
+	const loggedErrors = [];
+	const originalError = console.error;
+	console.error = (...args) => loggedErrors.push(args);
+	t.after(() => { console.error = originalError; });
+	for (const kind of ['post', 'edit', 'reply']) {
+		let finish;
+		let fail;
+		let calls = 0;
+		const method = kind === 'post' ? 'addPost' : kind === 'edit' ? 'updatePost' : 'addReply';
+		h.service[method] = () => { calls++; return new Promise((resolve, reject) => { finish = resolve; fail = reject; }); };
+		if (kind === 'post') h.panel.focus('post');
+		else h[kind]('first');
+		const input = kind === 'post' ? h.panel.composer.input : kind === 'edit' ? h.panel.editing.input : h.panel.replying.input;
+		const button = kind === 'post' ? h.root.querySelector('.soliloquy-post-button') : kind === 'edit' ? h.panel.editing.button : h.panel.replying.button;
+		input.value = 'Submit once';
+		button.click();
+		button.click();
+		input.focus();
+		press('Enter', { ctrlKey: true });
+		press('Enter', { ctrlKey: true, repeat: true });
+		assert.equal(calls, 1, kind);
+		assert.equal(button.disabled, true, kind);
+		fail(new Error('Expected write failure'));
+		await settle();
+		assert.equal(input.value, 'Submit once', kind);
+		assert.equal(button.disabled, false, kind);
+		button.click();
+		assert.equal(calls, 2, kind);
+		finish();
+		await settle();
+	}
+	assert.equal(loggedErrors.length, 3);
+});
+
+test('a completed save cannot close a newer edit or reply after focus cancelled its original field', async t => {
+	const h = await panelHarness(t);
+	for (const kind of ['edit', 'reply']) {
+		let finish;
+		h.service[kind === 'edit' ? 'updatePost' : 'addReply'] = () => new Promise(resolve => { finish = resolve; });
+		h[kind]('first');
+		const original = kind === 'edit' ? h.panel.editing : h.panel.replying;
+		original.input.value = 'Sent';
+		original.button.click();
+		h.edit('second');
+		const current = h.panel.editing;
+		current.input.value = 'New draft';
+		finish();
+		await settle();
+		assert.equal(original.input.view.destroyed, true);
+		assert.equal(h.panel.editing, current);
+		assert.equal(current.input.value, 'New draft');
+		assert.equal(document.activeElement, current.input.view.contentDOM);
+		h.panel.focus('post');
+		await settle();
+	}
+});
+
+test('rendered task checkboxes use source offsets and ignore embedded or unmappable checkboxes', async t => {
+	const h = harness(t);
+	const originalRender = MarkdownRenderer.render;
+	t.after(() => { MarkdownRenderer.render = originalRender; });
+	MarkdownRenderer.render = async (_app, _markdown, content) => {
+		content.createEl('pre', { text: '- [ ] example' });
+		content.createDiv({ cls: 'internal-embed' }).createEl('input', { cls: 'task-list-item-checkbox', attr: { type: 'checkbox' } });
+		content.createEl('input', { cls: 'task-list-item-checkbox', attr: { type: 'checkbox' } });
+	};
+	const changes = [];
+	const renderer = new PostCardRenderer(h.app, h.owner, {
+		getReplies: () => [], getPostKey: () => 'test', isFocused: () => false,
+		onTaskChange: (...args) => changes.push(args),
+	});
+	const content = '```md\n- [ ] Example\n```\n- [ ] Actual';
+	const post = { content, date: '2026-09-07', time: '12:00', file: { path: 'daily.md' } };
+	await renderer.render(post, h.root);
+	const [embedded, actual] = h.root.querySelectorAll('input');
+	embedded.dispatchEvent(new window.Event('change', { bubbles: true }));
+	assert.equal(changes.length, 0);
+	actual.checked = true;
+	actual.dispatchEvent(new window.Event('change', { bubbles: true }));
+	assert.deepEqual(changes, [[post, { markerOffset: content.indexOf('[ ] Actual') + 1 }, true]]);
+	await renderer.render({ ...post, content: '```md\n- [ ] Example\n```' }, h.root);
+	assert.equal(h.root.querySelectorAll('input')[3].disabled, true);
+});
+
+test('text entered while a save is pending stays in the current field', async t => {
+	const h = await panelHarness(t);
+	for (const kind of ['post', 'edit', 'reply']) {
+		let finish;
+		h.service[kind === 'post' ? 'addPost' : kind === 'edit' ? 'updatePost' : 'addReply'] = () => new Promise(resolve => { finish = resolve; });
+		if (kind === 'post') h.panel.focus('post');
+		else h[kind]('first');
+		const input = kind === 'post' ? h.panel.composer.input : kind === 'edit' ? h.panel.editing.input : h.panel.replying.input;
+		input.value = 'Submitted text';
+		input.focus();
+		press('Enter', { ctrlKey: true });
+		input.value = 'Text entered during save';
+		finish();
+		await settle();
+		assert.equal(input.view.destroyed, false, kind);
+		assert.equal(input.value, 'Text entered during save', kind);
+		assert.equal(document.activeElement, input.view.contentDOM, kind);
+		h.panel.focus('post');
+		await settle();
+	}
+});
+
+test('a slow post save does not steal focus from the note editor', async t => {
+	const h = await panelHarness(t);
+	let finish;
+	h.service.addPost = () => new Promise(resolve => { finish = resolve; });
+	h.panel.focus('post');
+	h.panel.composer.input.value = 'Sent';
+	press('Enter', { ctrlKey: true });
+	const note = document.body.createDiv({ attr: { contenteditable: 'true' } });
+	t.after(() => note.remove());
+	note.focus();
+	finish();
+	await settle();
+	assert.equal(document.activeElement, note);
+});
+
+test('focusing an input in another display cancels the first display draft', async t => {
+	const first = await panelHarness(t);
+	const second = await panelHarness(t);
+	first.reply('first');
+	const oldInput = first.panel.replying.input;
+	second.edit('second');
+	const newInput = second.panel.editing.input;
+	await settle();
+	assert.equal(oldInput.view.destroyed, true);
+	assert.equal(newInput.view.destroyed, false);
+	assert.equal(document.activeElement, newInput.view.contentDOM);
 });
 
 test.after(() => dom.window.close());

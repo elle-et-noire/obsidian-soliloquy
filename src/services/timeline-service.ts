@@ -2,6 +2,8 @@ import { App, moment, TFile } from 'obsidian';
 import type { SoliloquySettings } from '../settings';
 import type { TimelinePost } from '../types';
 import { buildDailyNotePath, parseDailyNoteDate } from './daily-note-path';
+import { MarkdownFenceTracker } from './markdown-fence';
+import { findMarkdownTasks, type MarkdownTask } from './markdown-tasks';
 import {
 	appendPostToTimelineSection,
 	detectLineEnding,
@@ -10,7 +12,6 @@ import {
 
 const POST_PATTERN = /^- (\d{2}:\d{2})(?:\s+\^([\w-]+))?(?:\s+(.+))?\s*$/;
 const REPLY_LINK_PATTERN = /^\[\[[^\]]*#\^([\w-]+)(?:\|[^\]]+)?\]\]$/;
-const TASK_MARKER_PATTERN = /^(\s*[-*+]\s+\[)[ xX](\])/;
 
 export class TimelineService {
 	private readonly postsByFile = new Map<string, TimelinePost[]>();
@@ -102,19 +103,13 @@ export class TimelineService {
 		this.invalidateFile(post.file);
 	}
 
-	async updateTask(post: TimelinePost, taskIndex: number, checked: boolean): Promise<void> {
-		let currentIndex = 0;
-		let found = false;
-		const content = post.content
-			.split('\n')
-			.map((line) => line.replace(TASK_MARKER_PATTERN, (match, prefix: string, suffix: string) => {
-				if (currentIndex++ !== taskIndex) return match;
-				found = true;
-				return `${prefix}${checked ? 'x' : ' '}${suffix}`;
-			}))
-			.join('\n');
-
-		if (!found) throw new Error('The task could not be found in the post.');
+	async updateTask(post: TimelinePost, task: MarkdownTask, checked: boolean): Promise<void> {
+		const offset = task.markerOffset;
+		if (!findMarkdownTasks(post.content).some((item) => item.markerOffset === offset)) {
+			throw new Error('The task could not be found in the post.');
+		}
+		const content = post.content.slice(0, offset)
+			+ (checked ? 'x' : ' ') + post.content.slice(offset + 1);
 		await this.updatePost(post, content);
 	}
 
@@ -179,11 +174,29 @@ export class TimelineService {
 	): TimelinePost[] {
 		const posts: TimelinePost[] = [];
 		let current: TimelinePost | null = null;
+		let blankLines = 0;
+		const fence = new MarkdownFenceTracker();
 
 		for (const [index, line] of lines.entries()) {
+			// Stored body lines belong to the post, including its indented code fences.
+			if (current && (line.startsWith('\t') || line.startsWith('  '))) {
+				const continuation = line.startsWith('\t') ? line.slice(1) : line.slice(2);
+				current.content += current.content ? `\n${'\n'.repeat(blankLines)}${continuation}` : continuation;
+				current.lineEnd = lineOffset + index + 1;
+				blankLines = 0;
+				continue;
+			}
+			if (!line.trim()) {
+				if (current) blankLines++;
+				continue;
+			}
+			// Never extend a replacement range across unrelated paragraphs or lists.
+			if (current) posts.push(this.withReplyMetadata(current));
+			current = null;
+			blankLines = 0;
+			if (fence.consume(line)) continue;
 			const match = POST_PATTERN.exec(line);
 			if (match?.[1]) {
-				if (current) posts.push(this.withReplyMetadata(current));
 				current = {
 					date,
 					time: match[1],
@@ -194,11 +207,6 @@ export class TimelineService {
 					blockId: match[2],
 				};
 				continue;
-			}
-			if (current && (line.startsWith('\t') || line.startsWith('  '))) {
-				const continuation = line.startsWith('\t') ? line.slice(1) : line.slice(2);
-				current.content += current.content ? `\n${continuation}` : continuation;
-				current.lineEnd = lineOffset + index + 1;
 			}
 		}
 

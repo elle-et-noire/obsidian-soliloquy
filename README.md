@@ -57,7 +57,8 @@ Sidebar, tab, and modal displays share the same input shortcuts:
 - Inputs follow Obsidian's **Settings → Editor → Vim key bindings** setting. New Vim inputs start in Insert mode without a persistent mode indicator. Setting changes apply when an input receives focus again. Custom mappings from other Vim plugins are not automatically inherited.
 - In Vim Insert mode, `Tab` indents the current or selected lines and `Shift+Tab` removes one level of indentation. In Normal mode, both keys keep their standard forward/backward focus navigation.
 - `Esc` inside a post, search, edit, or reply input stays in the editor. With Vim enabled, it exits Insert/Visual mode or cancels a Vim command. Repeated presses never close the display.
-- `Shift+Esc` in search returns to the post input, carrying over the text and selection. In a post, edit, or reply input, it moves focus to the timeline without discarding the draft or selection. Use the cancel button to discard an edit or reply. IME composition and held-key repeats do not change focus or close the display.
+- `Shift+Esc` in search returns to the post input, carrying over the text and selection. In a post, edit, or reply input, it moves focus to the timeline without discarding the draft or selection. IME composition and held-key repeats do not change focus or close the display.
+- Only one edit or reply input stays open in each display. Moving focus to another text field (including the post/search input or a note editor) cancels the edit or reply, just like its cancel button. Focusing a button or the timeline keeps the draft, as do Vim prompts within the same input.
 - Outside text fields, `/` returns to the last visible text field without inserting a slash. If that field is no longer visible, it focuses the main composer (preserving search mode when returning from search). Inside text fields, `/` is entered normally.
 - Outside text fields, either `Esc` or `Shift+Esc` closes a modal. A sidebar or regular tab stays open and focus moves to another main workspace pane; if there is no other pane, focus leaves the Soliloquy content.
 
@@ -66,6 +67,7 @@ Sidebar, tab, and modal displays share the same input shortcuts:
 Run **Soliloquy: Open timeline in modal**, or assign it a hotkey under **Settings → Hotkeys**. The modal starts with the post input focused and includes the full timeline, search, threads, replies, and editing. An existing sidebar or tab stays open with its own input and navigation state; both displays use the same daily notes.
 
 - `Ctrl+Enter` posts, replies, or saves an edit. Posting keeps the modal open.
+- While a save is in progress, repeated clicks and submission shortcuts do not submit the same input again. Failed saves keep the input available for retry.
 - Closing uses Obsidian's standard focus restoration. Following a date, time, or note link closes the modal and opens that destination instead.
 - Running the modal command again focuses the existing modal rather than opening another one.
 - Background updates wait while a post editor or reply composer is open so that another display's posts do not discard that draft. Saving or cancelling refreshes the timeline.

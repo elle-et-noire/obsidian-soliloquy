@@ -20,7 +20,9 @@ export class Component {
 export const moment = () => ({ format: () => '2026-09-07' });
 export class Notice {}
 export class MarkdownView {}
-export class MarkdownRenderer {}
+export class MarkdownRenderer {
+	static async render(_app, markdown, element) { element.textContent = markdown; }
+}
 export function setIcon() {}
 
 export function installDomHelpers(window) {

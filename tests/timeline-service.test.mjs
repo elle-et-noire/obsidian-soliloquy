@@ -139,7 +139,7 @@ test('preserves CRLF line endings when updating a task', async () => {
 	].join('\r\n'));
 	const target = post({ content: '- [ ] Task' });
 
-	await harness.service.updateTask(target, 0, true);
+	await harness.service.updateTask(target, { markerOffset: 3 }, true);
 
 	const updated = harness.getSource();
 	assert.equal(updated.replaceAll('\r\n', '').includes('\n'), false);
@@ -326,4 +326,71 @@ test('rereads only an invalidated daily note', async () => {
 	assert.equal(updated[0]?.content, 'Updated');
 	assert.equal(reads.get(first.path), 1);
 	assert.equal(reads.get(second.path), 2);
+});
+
+test('editing never removes paragraphs, lists or code following a post', async () => {
+	for (const ending of ['\n', '\r\n']) {
+		for (const outside of [
+			['Unrelated paragraph', '    Indented code'],
+			['- Shopping', '  - Milk'],
+			['```md', '- 11:00 ^sol-example', '\tExample', '```'],
+		]) {
+			const tail = ['', ...outside, '', '- 12:00 ^sol-next', '\tNext'].join(ending);
+			const source = ['## soliloquy', '- 10:00 ^sol-target', '\tTarget'].join(ending) + ending + tail;
+			const h = createHarness(source);
+			await h.service.updatePost(post(), 'Updated');
+			assert.equal(h.getSource(), ['## soliloquy', '- 10:00 ^sol-target', '\tUpdated'].join(ending) + ending + tail);
+		}
+	}
+});
+
+test('post parsing retains indented code and blank lines but ignores top-level fenced examples', async () => {
+	const source = [
+		'## soliloquy',
+		'````md', '- 09:00 ^sol-example', '\tExample', '```', '- 09:30 ^sol-example2', '````',
+		'- 10:00 ^sol-target', '\tTarget', '', '\tSecond paragraph', '\t', '\t```md', '\t- 09:00 ^sol-body-example', '\t```',
+		'~~~', '- 11:00 ^sol-tilde-example', '\tExample', '~~~',
+		'- 12:00 ^sol-next', '\tNext',
+	].join('\n');
+	const h = createHarness(source);
+	const posts = h.service.parsePosts(source.split('\n').slice(1), 1, '2026-07-13', FILE);
+	assert.deepEqual(posts.map(item => item.blockId), ['sol-target', 'sol-next']);
+	assert.equal(posts[0].content, 'Target\n\nSecond paragraph\n\n```md\n- 09:00 ^sol-body-example\n```');
+	assert.equal(posts[0].lineStart, 7);
+	assert.equal(posts[0].lineEnd, 15);
+	await h.service.updatePost(posts[0], 'Changed');
+	assert.ok(h.getSource().includes('~~~\n- 11:00 ^sol-tilde-example\n\tExample\n~~~'));
+	assert.ok(h.getSource().includes('- 09:00 ^sol-example\n\tExample'));
+});
+
+test('unclosed and mismatched fences cannot produce editable posts', () => {
+	for (const opening of ['```md', '~~~~']) {
+		const lines = [opening, '- 10:00 ^sol-example', '\tExample', '~~~', '- 11:00 ^sol-example2'];
+		assert.deepEqual(createHarness('').service.parsePosts(lines, 1, '2026-07-13', FILE), []);
+	}
+});
+
+test('task updates follow Markdown source positions through code, nested lists and quotes', async () => {
+	const content = [
+		'```md', '- [ ] Fenced example', '```', '',
+		'    - [ ] Indented example', '',
+		'- [ ] Actual parent', '  - [ ] Actual child', '',
+		'> - [ ] Quoted task', '',
+		'1. [ ] Ordered task', '',
+		'- Item', '  ~~~', '  - [ ] Nested code', '  ~~~',
+	].join('\n');
+	for (const label of ['Actual parent', 'Actual child', 'Quoted task', 'Ordered task']) {
+		const offset = content.indexOf(`[ ] ${label}`) + 1;
+		const source = ['## soliloquy', '- 10:00 ^sol-target', ...content.split('\n').map(line => '\t' + line)].join('\n');
+		const h = createHarness(source);
+		const target = post({ content });
+		await h.service.updateTask(target, { markerOffset: offset }, true);
+		assert.equal(h.getSource(), source.replace(`[ ] ${label}`, `[x] ${label}`));
+	}
+	for (const label of ['Fenced example', 'Indented example', 'Nested code']) {
+		const h = createHarness('');
+		await assert.rejects(h.service.updateTask(post({ content }), {
+			markerOffset: content.indexOf(`[ ] ${label}`) + 1,
+		}, true), /task could not be found/);
+	}
 });

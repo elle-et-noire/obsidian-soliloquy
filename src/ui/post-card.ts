@@ -1,5 +1,6 @@
 import { App, Component, MarkdownRenderer, setIcon } from 'obsidian';
 import type { TimelinePost } from '../types';
+import { findMarkdownTasks, type MarkdownTask } from '../services/markdown-tasks';
 
 export type PostContext = 'timeline' | 'root' | 'reply';
 
@@ -21,31 +22,50 @@ interface PostCardCallbacks {
 		stayOnTimeline: boolean,
 	) => void;
 	onSearchTag: (tag: string) => void;
-	onTaskChange: (post: TimelinePost, taskIndex: number, checked: boolean) => void;
+	onTaskChange: (post: TimelinePost, task: MarkdownTask, checked: boolean) => void;
 }
 
 export class PostCardRenderer {
-	private readonly renderedComponents = new Set<Component>();
+	private readonly componentsByCard = new Map<HTMLElement, Component>();
 
 	constructor(
 		private readonly app: App,
 		private readonly owner: Component,
 		private readonly callbacks: PostCardCallbacks,
 	) {
-		this.owner.register(() => this.renderedComponents.clear());
+		this.owner.register(() => this.componentsByCard.clear());
 	}
 
 	clear(): void {
-		for (const component of this.renderedComponents) {
+		for (const component of this.componentsByCard.values()) {
 			this.owner.removeChild(component);
 		}
-		this.renderedComponents.clear();
+		this.componentsByCard.clear();
+	}
+
+	releaseCard(card: HTMLElement): void {
+		const component = this.componentsByCard.get(card);
+		if (!component) return;
+		this.owner.removeChild(component);
+		this.componentsByCard.delete(card);
+	}
+
+	async restoreCard(card: HTMLElement, post: TimelinePost): Promise<void> {
+		const parent = card.parentElement;
+		if (!parent) return;
+		const context = (card.dataset.postContext ?? 'timeline') as PostContext;
+		this.releaseCard(card);
+		// render inserts the replacement synchronously, before awaiting Markdown.
+		const rendering = this.render(post, parent, context, card);
+		card.remove();
+		await rendering;
 	}
 
 	async render(
 		post: TimelinePost,
 		container: HTMLElement,
 		context: PostContext = 'timeline',
+		before?: HTMLElement,
 	): Promise<void> {
 		const postKey = this.callbacks.getPostKey(post);
 		const card = container.createDiv({
@@ -58,6 +78,8 @@ export class PostCardRenderer {
 			},
 		});
 		card.dataset.postKey = postKey;
+		card.dataset.postContext = context;
+		if (before) container.insertBefore(card, before);
 		if (this.callbacks.isFocused(post)) card.addClass('is-focused');
 		let dragStart: { x: number; y: number } | undefined;
 		let dragged = false;
@@ -75,26 +97,31 @@ export class PostCardRenderer {
 		const replies = this.callbacks.getReplies(post);
 		const content = card.createDiv({ cls: 'soliloquy-post-content markdown-rendered' });
 		const renderOwner = this.owner.addChild(new Component());
-		this.renderedComponents.add(renderOwner);
+		this.componentsByCard.set(card, renderOwner);
 		try {
 			await MarkdownRenderer.render(this.app, post.content, content, post.file.path, renderOwner);
 		} catch (error) {
-			this.owner.removeChild(renderOwner);
-			this.renderedComponents.delete(renderOwner);
+			this.releaseCard(card);
 			throw error;
 		}
+		if (this.componentsByCard.get(card) !== renderOwner) return;
 		const checkboxes = Array.from(
-			content.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
-		);
+			content.querySelectorAll<HTMLInputElement>('input.task-list-item-checkbox'),
+		).filter((checkbox) => !checkbox.closest('.internal-embed'));
+		const tasks = checkboxes.length ? findMarkdownTasks(post.content) : [];
+		const taskByCheckbox = new Map<HTMLInputElement, MarkdownTask>();
 		for (const [index, checkbox] of checkboxes.entries()) {
 			checkbox.setAttribute('aria-label', `Task ${index + 1} in post from ${post.date} at ${post.time}`);
+			const task = tasks[index];
+			// A renderer extension may introduce checkboxes we cannot map safely.
+			if (tasks.length === checkboxes.length && task) taskByCheckbox.set(checkbox, task);
+			else checkbox.disabled = true;
 		}
 		content.addEventListener('change', (event) => {
 			const target = event.target;
-			if (!(target instanceof HTMLInputElement) || target.type !== 'checkbox') return;
-			const taskIndex = checkboxes.indexOf(target);
-			if (taskIndex < 0) return;
-			this.callbacks.onTaskChange(post, taskIndex, target.checked);
+			const task = taskByCheckbox.get(target as HTMLInputElement);
+			if (!task) return;
+			this.callbacks.onTaskChange(post, task, (target as HTMLInputElement).checked);
 		});
 
 		const meta = card.createDiv({ cls: 'soliloquy-post-meta' });

@@ -33,6 +33,7 @@
 		"typescript-eslint": "^8.59.1"
 	},
 	"dependencies": {
+		"@lezer/markdown": "1.7.2",
 		"@replit/codemirror-vim": "^6.4.0"
 	}
 }
