@@ -1,6 +1,8 @@
-import { App, Component, MarkdownRenderer, setIcon } from 'obsidian';
+import { App, Component, MarkdownRenderer, Notice, setIcon } from 'obsidian';
 import type { TimelinePost } from '../types';
 import { findMarkdownTasks, type MarkdownTask } from '../services/markdown-tasks';
+import { applyPostUpdate } from '../services/post-snapshot';
+import { taskCheckboxes, resolveTaskChange } from './task-checkboxes';
 
 export type PostContext = 'timeline' | 'root' | 'reply';
 
@@ -22,7 +24,7 @@ interface PostCardCallbacks {
 		stayOnTimeline: boolean,
 	) => void;
 	onSearchTag: (tag: string) => void;
-	onTaskChange: (post: TimelinePost, task: MarkdownTask, checked: boolean) => void;
+	onTaskChange: (post: TimelinePost, task: MarkdownTask, checked: boolean, saved: () => void) => Promise<void>;
 }
 
 export class PostCardRenderer {
@@ -67,6 +69,9 @@ export class PostCardRenderer {
 		context: PostContext = 'timeline',
 		before?: HTMLElement,
 	): Promise<void> {
+		// A pending edit can mutate the shared post while this card stays visible.
+		// Task offsets must always refer to the text that was actually rendered.
+		const renderedPost = { ...post };
 		const postKey = this.callbacks.getPostKey(post);
 		const card = container.createDiv({
 			cls: `soliloquy-post${context === 'root' ? ' soliloquy-thread-root' : ''}`,
@@ -99,29 +104,54 @@ export class PostCardRenderer {
 		const renderOwner = this.owner.addChild(new Component());
 		this.componentsByCard.set(card, renderOwner);
 		try {
-			await MarkdownRenderer.render(this.app, post.content, content, post.file.path, renderOwner);
+			await MarkdownRenderer.render(this.app, renderedPost.content, content, renderedPost.file.path, renderOwner);
 		} catch (error) {
 			this.releaseCard(card);
 			throw error;
 		}
 		if (this.componentsByCard.get(card) !== renderOwner) return;
-		const checkboxes = Array.from(
-			content.querySelectorAll<HTMLInputElement>('input.task-list-item-checkbox'),
-		).filter((checkbox) => !checkbox.closest('.internal-embed'));
-		const tasks = checkboxes.length ? findMarkdownTasks(post.content) : [];
+		const checkboxes = taskCheckboxes(content);
+		const tasks = checkboxes.length ? findMarkdownTasks(renderedPost.content) : [];
 		const taskByCheckbox = new Map<HTMLInputElement, MarkdownTask>();
+		const checkedByCheckbox = new Map(checkboxes.map(checkbox => [checkbox, checkbox.checked]));
 		for (const [index, checkbox] of checkboxes.entries()) {
 			checkbox.setAttribute('aria-label', `Task ${index + 1} in post from ${post.date} at ${post.time}`);
 			const task = tasks[index];
-			// A renderer extension may introduce checkboxes we cannot map safely.
-			if (tasks.length === checkboxes.length && task) taskByCheckbox.set(checkbox, task);
-			else checkbox.disabled = true;
+			// Treat parser positions as hints, including when a renderer extension
+			// changes the number or order of the visible checkboxes.
+			if (tasks.length === checkboxes.length && task
+				&& checkbox.checked === (renderedPost.content[task.markerOffset] !== ' ')) taskByCheckbox.set(checkbox, task);
 		}
 		content.addEventListener('change', (event) => {
-			const target = event.target;
-			const task = taskByCheckbox.get(target as HTMLInputElement);
-			if (!task) return;
-			this.callbacks.onTaskChange(post, task, (target as HTMLInputElement).checked);
+			const target = event.target as HTMLInputElement;
+			if (!checkedByCheckbox.has(target) || target.disabled) return;
+			const wasChecked = checkedByCheckbox.get(target)!;
+			const checked = target.checked;
+			if (checked === wasChecked) return;
+			const beforeSave = { ...renderedPost };
+			// Serialize changes to this card's snapshot, including other tasks.
+			for (const checkbox of checkboxes) checkbox.disabled = true;
+			void (async () => {
+				const task = await resolveTaskChange(this.app, renderOwner, beforeSave, taskByCheckbox.get(target), checkboxes, target, checked,
+					() => this.componentsByCard.get(card) === renderOwner);
+				if (this.componentsByCard.get(card) !== renderOwner) return;
+				if (!task) {
+					new Notice('Could not identify the task. Reload the timeline and try again.');
+					target.checked = wasChecked;
+					return;
+				}
+				await this.callbacks.onTaskChange(renderedPost, task, checked, () => {
+					// Editing/thread actions keep using the shared post. Do not overwrite
+					// a newer edit that completed while the task save was pending.
+					applyPostUpdate(post, beforeSave, renderedPost);
+				});
+				taskByCheckbox.set(target, task);
+				checkedByCheckbox.set(target, checked);
+			})()
+				.catch(() => { target.checked = wasChecked; })
+				.finally(() => {
+					for (const checkbox of checkboxes) checkbox.disabled = false;
+				});
 		});
 
 		const meta = card.createDiv({ cls: 'soliloquy-post-meta' });

@@ -103,9 +103,12 @@ export class TimelineService {
 		this.invalidateFile(post.file);
 	}
 
-	async updateTask(post: TimelinePost, task: MarkdownTask, checked: boolean): Promise<void> {
+	async updateTask(post: TimelinePost, task: MarkdownTask, checked: boolean, options?: { verifiedByRenderer: boolean }): Promise<void> {
 		const offset = task.markerOffset;
-		if (!findMarkdownTasks(post.content).some((item) => item.markerOffset === offset)) {
+		// A renderer-verified position also handles Obsidian syntax that Lezer
+		// cannot classify. The caller must verify the exact post snapshot first.
+		if (!Number.isInteger(offset) || offset < 1 || !/^\[[^\r\n]\][ \t]/.test(post.content.slice(offset - 1))
+			|| (!options?.verifiedByRenderer && !findMarkdownTasks(post.content).some((item) => item.markerOffset === offset))) {
 			throw new Error('The task could not be found in the post.');
 		}
 		const content = post.content.slice(0, offset)

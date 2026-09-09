@@ -1,5 +1,6 @@
 import { type App, type Component, Notice, setIcon } from 'obsidian';
 import type { TimelineService } from '../services/timeline-service';
+import { applyPostUpdate } from '../services/post-snapshot';
 import type { TimelinePost } from '../types';
 import { captureFocusWithin, shouldRestoreFocusWithin } from './focus-preservation';
 import type { PostCardRenderer } from './post-card';
@@ -13,7 +14,7 @@ interface DraftInput {
 }
 
 type InlineDraft = DraftInput & (
-	| { kind: 'edit'; card: HTMLElement }
+	| { kind: 'edit'; card: HTMLElement; sourcePost: TimelinePost }
 	| {
 		kind: 'reply';
 		element: HTMLElement;
@@ -80,8 +81,8 @@ export class InlinePostEditor {
 		card.setAttribute('aria-label', `Edit post from ${post.date} at ${post.time}`);
 		card.removeAttribute('aria-keyshortcuts');
 		const draft: InlineDraft = {
-			...this.createInput(card, post, 'edit'),
-			kind: 'edit', card,
+			...this.createInput(card, { ...post }, 'edit'),
+			kind: 'edit', card, sourcePost: post,
 		};
 		this.activate(draft);
 	}
@@ -178,7 +179,7 @@ export class InlinePostEditor {
 		this.clear(restoreFocus);
 		try {
 			if (draft.kind === 'edit') {
-				await this.renderer.restoreCard(draft.card, draft.post);
+				await this.renderer.restoreCard(draft.card, draft.sourcePost);
 				if (!this.disposed && restoreFocus && shouldRestoreFocusWithin(this.root, previousFocus)) {
 					this.callbacks.focusTimeline();
 				}
@@ -200,16 +201,25 @@ export class InlinePostEditor {
 		}
 		draft.saving = true;
 		this.updateButton(draft);
+		let previousFocus: Element | null = null;
 		try {
-			if (draft.kind === 'edit') await this.service.updatePost(draft.post, content);
+			if (draft.kind === 'edit') {
+				const beforeSave = { ...draft.post };
+				await this.service.updatePost(draft.post, content);
+				applyPostUpdate(draft.sourcePost, beforeSave, draft.post);
+			}
 			else await this.service.addReply(draft.post, content);
 			if (this.disposed) return;
 			// A pending save must not close a newer field or discard additional text.
 			if (this.active === draft && draft.input.value === content) {
+				if (draft.kind === 'edit') previousFocus = captureFocusWithin(draft.card);
 				this.clear(true);
 				if (draft.kind === 'reply') this.callbacks.onReplySaved(draft.post, draft.stayOnTimeline);
 			}
 			await this.callbacks.refresh();
+			if (!this.disposed && !this.active && shouldRestoreFocusWithin(this.root, previousFocus)) {
+				this.callbacks.focusTimeline();
+			}
 		} catch (error) {
 			console.error(`Soliloquy: failed to save ${draft.kind}`, error);
 			new Notice(draft.kind === 'edit'

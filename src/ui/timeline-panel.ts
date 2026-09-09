@@ -75,9 +75,7 @@ export class TimelinePanel extends Component {
 				this.inlineEditor.openReply(card, button, post, this.postKey(post), stayOnTimeline);
 			},
 			onSearchTag: (tag) => this.searchForTag(tag),
-			onTaskChange: (post, task, checked) => {
-				void this.saveTaskState(post, task, checked);
-			},
+			onTaskChange: (post, task, checked, saved) => this.saveTaskState(post, task, checked, saved),
 		});
 		this.inlineEditor = new InlinePostEditor(this.app, this, this.contentEl, this.service, this.postRenderer, {
 			refresh: () => this.refreshTimeline(true),
@@ -604,14 +602,26 @@ export class TimelinePanel extends Component {
 		post: TimelinePost,
 		task: MarkdownTask,
 		checked: boolean,
+		saved: () => void,
 	): Promise<void> {
 		try {
-			await this.service.updateTask(post, task, checked);
-			await this.refreshTimeline(true);
+			await this.service.updateTask(post, task, checked, { verifiedByRenderer: true });
+			saved();
 		} catch (error) {
 			console.error('Soliloquy: failed to update task', error);
 			new Notice('Could not update the task. Reload the timeline and try again.');
+			try {
+				await this.refreshTimeline(true);
+			} catch (refreshError) {
+				console.error('Soliloquy: failed to refresh after task failure', refreshError);
+			}
+			throw error; // Let the card restore the checkbox when the update was rejected.
+		}
+		try {
 			await this.refreshTimeline(true);
+		} catch (error) {
+			console.error('Soliloquy: failed to refresh after updating task', error);
+			new Notice('Task saved, but the timeline could not refresh.');
 		}
 	}
 }

@@ -16,12 +16,15 @@ installDomHelpers(window);
 // jsdom has no layout engine. These are only used by CodeMirror's measurements.
 window.Range.prototype.getClientRects = () => [];
 window.Range.prototype.getBoundingClientRect = () => ({ left: 0, right: 0, top: 0, bottom: 0 });
+window.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {} });
+window.HTMLElement.prototype.scrollIntoView = () => {};
 
 const result = await build({
 	stdin: { contents: `
 		export { SoliloquyTextEditor } from './src/ui/text-editor';
 		export { SoliloquyComposer } from './src/ui/composer';
 		export { TimelinePanel } from './src/ui/timeline-panel';
+		export { TimelineService } from './src/services/timeline-service';
 		export { PostCardRenderer } from './src/ui/post-card';
 		export { MarkdownRenderer } from './tests/editor-dom-harness.mjs';
 		export { registerTimelineKeyboard } from './src/ui/timeline-keyboard';
@@ -32,7 +35,7 @@ const result = await build({
 });
 const source = result.outputFiles[0]?.text;
 if (!source) throw new Error('Editor test bundle was not generated.');
-const { SoliloquyTextEditor, SoliloquyComposer, TimelinePanel, PostCardRenderer, MarkdownRenderer, registerTimelineKeyboard, getCM } = await import(
+const { SoliloquyTextEditor, SoliloquyComposer, TimelinePanel, TimelineService, PostCardRenderer, MarkdownRenderer, registerTimelineKeyboard, getCM } = await import(
 	`data:text/javascript;base64,${Buffer.from(source + '\n//# sourceURL=soliloquy-editor-tests.js').toString('base64')}`
 );
 
@@ -537,19 +540,19 @@ test('a completed save cannot close a newer edit or reply after focus cancelled 
 	}
 });
 
-test('rendered task checkboxes use source offsets and ignore embedded or unmappable checkboxes', async t => {
+test('rendered task checkboxes use source offsets and reject embedded or unmappable changes', async t => {
 	const h = harness(t);
 	const originalRender = MarkdownRenderer.render;
 	t.after(() => { MarkdownRenderer.render = originalRender; });
-	MarkdownRenderer.render = async (_app, _markdown, content) => {
+	MarkdownRenderer.render = async (_app, markdown, content) => {
 		content.createEl('pre', { text: '- [ ] example' });
 		content.createDiv({ cls: 'internal-embed' }).createEl('input', { cls: 'task-list-item-checkbox', attr: { type: 'checkbox' } });
-		content.createEl('input', { cls: 'task-list-item-checkbox', attr: { type: 'checkbox' } });
+		content.createEl('input', { cls: 'task-list-item-checkbox', attr: { type: 'checkbox' } }).checked = markdown.includes('[x] Actual');
 	};
 	const changes = [];
 	const renderer = new PostCardRenderer(h.app, h.owner, {
 		getReplies: () => [], getPostKey: () => 'test', isFocused: () => false,
-		onTaskChange: (...args) => changes.push(args),
+		onTaskChange: async (...args) => { changes.push(args); },
 	});
 	const content = '```md\n- [ ] Example\n```\n- [ ] Actual';
 	const post = { content, date: '2026-09-07', time: '12:00', file: { path: 'daily.md' } };
@@ -559,9 +562,14 @@ test('rendered task checkboxes use source offsets and ignore embedded or unmappa
 	assert.equal(changes.length, 0);
 	actual.checked = true;
 	actual.dispatchEvent(new window.Event('change', { bubbles: true }));
-	assert.deepEqual(changes, [[post, { markerOffset: content.indexOf('[ ] Actual') + 1 }, true]]);
+	await settle();
+	assert.deepEqual(changes.map(args => args.slice(0, 3)), [[post, { markerOffset: content.indexOf('[ ] Actual') + 1 }, true]]);
 	await renderer.render({ ...post, content: '```md\n- [ ] Example\n```' }, h.root);
-	assert.equal(h.root.querySelectorAll('input')[3].disabled, true);
+	const unmappable = h.root.querySelectorAll('input')[3];
+	unmappable.click();
+	await settle();
+	assert.equal(unmappable.checked, false);
+	assert.equal(changes.length, 1);
 });
 
 test('text entered while a save is pending stays in the current field', async t => {
@@ -649,6 +657,374 @@ test('an edit or reply save finishing after unload cannot refresh, navigate, or 
 		assert.equal(draft.input.view.destroyed, true, kind);
 		assert.deepEqual(callbacks, [], kind);
 	}
+});
+
+test('Ctrl+Enter saves an edit and restores keyboard focus to that post', async t => {
+	const h = await panelHarness(t);
+	h.edit('second');
+	h.panel.inlineEditor.active.input.value = 'Updated';
+	press('Enter', { ctrlKey: true });
+	await settle();
+	assert.equal(h.panel.inlineEditor.isOpen(), false);
+	assert.equal(document.activeElement, h.card('second'));
+	press('ArrowUp');
+	assert.equal(document.activeElement, h.card('first'));
+});
+
+test('edit save focus restoration leaves a new text field focused during refresh', async t => {
+	const h = await panelHarness(t);
+	let finishRead;
+	h.service.getPosts = () => new Promise(resolve => { finishRead = resolve; });
+	h.edit('first');
+	press('Enter', { ctrlKey: true });
+	await settle();
+	const note = document.body.createDiv({ attr: { contenteditable: 'true' } });
+	t.after(() => note.remove());
+	note.focus();
+	finishRead(h.posts);
+	await settle();
+	assert.equal(document.activeElement, note);
+});
+
+test('a stale task card cannot update another task after a pending edit completes', async t => {
+	const h = await panelHarness(t);
+	const originalRender = MarkdownRenderer.render;
+	const originalError = console.error;
+	const errors = [];
+	console.error = (...args) => errors.push(args);
+	t.after(() => { MarkdownRenderer.render = originalRender; console.error = originalError; });
+	MarkdownRenderer.render = async (_app, markdown, element) => {
+		for (const line of markdown.split('\n')) {
+			const label = element.createEl('label', { text: line.replace(/^- \[[ x]\] /, '') });
+			if (/^- \[[ x]\]/.test(line)) label.createEl('input', {
+				cls: 'task-list-item-checkbox', attr: { type: 'checkbox' },
+			}).checked = line.includes('[x]');
+		}
+	};
+	let persisted = '## soliloquy\n- 12:00 ^first\n\t- [ ] AAA\n\t- [ ] BBB';
+	const service = new TimelineService({ vault: { process: async (_file, update) => {
+		persisted = update(persisted);
+	} } }, () => ({ sectionHeading: 'soliloquy' }));
+	h.posts[0].content = '- [ ] AAA\n- [ ] BBB';
+	await h.panel.refreshTimeline();
+	let finishSave;
+	h.service.updatePost = async (post, content) => {
+		await new Promise(resolve => { finishSave = resolve; });
+		await service.updatePost(post, content);
+		h.posts[0].content = post.content;
+	};
+	h.service.updateTask = (...args) => service.updateTask(...args);
+	h.edit('first');
+	h.panel.inlineEditor.active.input.value = '- [ ] BBB\n- [ ] AAA';
+	press('Enter', { ctrlKey: true });
+	h.edit('second');
+	const otherDraft = h.panel.inlineEditor.active;
+	otherDraft.input.value = 'Keep this draft';
+	await settle();
+	finishSave();
+	await settle();
+	const checkbox = h.card('first').querySelector('input');
+	assert.equal(checkbox.parentElement.textContent, 'AAA');
+	checkbox.checked = true;
+	checkbox.dispatchEvent(new window.Event('change', { bubbles: true }));
+	await settle();
+	assert.equal(persisted, '## soliloquy\n- 12:00 ^first\n\t- [ ] BBB\n\t- [ ] AAA');
+	assert.equal(checkbox.checked, false);
+	assert.equal(checkbox.disabled, false);
+	assert.equal(errors.length, 1);
+	assert.equal(h.panel.inlineEditor.active, otherDraft);
+	assert.equal(otherDraft.input.value, 'Keep this draft');
+});
+
+test('task mapping captures the source before asynchronous Markdown rendering', async t => {
+	const h = harness(t);
+	const originalRender = MarkdownRenderer.render;
+	t.after(() => { MarkdownRenderer.render = originalRender; });
+	let finishRender;
+	MarkdownRenderer.render = async (_app, markdown, element) => {
+		if (!finishRender) await new Promise(resolve => { finishRender = resolve; });
+		element.createEl('input', { cls: 'task-list-item-checkbox', attr: { type: 'checkbox' } }).checked = markdown.includes('[x]');
+	};
+	const changes = [];
+	const renderer = new PostCardRenderer(h.app, h.owner, {
+		getReplies: () => [], getPostKey: () => 'test', isFocused: () => false,
+		onTaskChange: async (...args) => { changes.push(args); },
+	});
+	const post = { content: '- [ ] Original', date: '2026-09-07', time: '12:00', file: { path: 'daily.md' } };
+	const render = renderer.render(post, h.root);
+	post.content = '- [ ] Different';
+	finishRender();
+	await render;
+	const checkbox = h.root.querySelector('input');
+	checkbox.checked = true;
+	checkbox.dispatchEvent(new window.Event('change', { bubbles: true }));
+	await settle();
+	assert.equal(changes[0][0].content, '- [ ] Original');
+	assert.notEqual(changes[0][0], post);
+});
+
+test('Obsidian custom states and hidden comment tasks keep visible checkboxes usable', async t => {
+	const h = harness(t);
+	const originalRender = MarkdownRenderer.render;
+	t.after(() => { MarkdownRenderer.render = originalRender; });
+	// The two visible inputs emitted by Obsidian for this Markdown.
+	MarkdownRenderer.render = async (_app, markdown, element) => {
+		for (const line of markdown.split('\n').slice(-2)) {
+			const label = element.createEl('li', { text: line.slice(6) });
+			label.createEl('input', {
+				cls: 'task-list-item-checkbox', attr: { type: 'checkbox' },
+			}).checked = line[3] !== ' ';
+		}
+	};
+	const changes = [];
+	const renderer = new PostCardRenderer(h.app, h.owner, {
+		getReplies: () => [], getPostKey: () => 'test', isFocused: () => false,
+		onTaskChange: async (post, task, checked, saved) => {
+			changes.push([post, task, checked]);
+			post.content = post.content.slice(0, task.markerOffset) + (checked ? 'x' : ' ') + post.content.slice(task.markerOffset + 1);
+			saved();
+		},
+	});
+	const content = '%%\n- [ ] Hidden\n%%\n\n- [ ] Todo\n- [-] Cancelled';
+	const post = { content, date: '2026-09-07', time: '12:00', file: { path: 'daily.md' } };
+	await renderer.render(post, h.root);
+	const inputs = [...h.root.querySelectorAll('input')];
+	assert.deepEqual(inputs.map(input => input.disabled), [false, false]);
+	for (const input of inputs) {
+		input.checked = !input.checked;
+		input.dispatchEvent(new window.Event('change', { bubbles: true }));
+		assert.deepEqual(inputs.map(input => input.disabled), [true, true]);
+		const count = changes.length;
+		inputs[1].click();
+		assert.equal(changes.length, count, 'Other task changes wait for the current save');
+		await settle();
+		assert.deepEqual(inputs.map(input => input.disabled), [false, false]);
+	}
+	assert.deepEqual(changes.map(([, task]) => task.markerOffset), [content.indexOf('[ ] Todo') + 1, content.indexOf('[-] Cancelled') + 1]);
+});
+
+function renderTask(element, text, status = ' ') {
+	const item = element.createEl('li');
+	const checkbox = item.createEl('input', { cls: 'task-list-item-checkbox', attr: { type: 'checkbox' } });
+	checkbox.checked = status !== ' ';
+	item.createSpan({ text });
+	return checkbox;
+}
+
+async function taskPanelHarness(t, content = '- [ ] Task', renderMarkdown) {
+	const h = await panelHarness(t);
+	const originalRender = MarkdownRenderer.render;
+	const originalError = console.error;
+	const errors = [];
+	t.after(() => { MarkdownRenderer.render = originalRender; console.error = originalError; });
+	console.error = (...args) => errors.push(args);
+	MarkdownRenderer.render = renderMarkdown ?? (async (_app, markdown, element) => {
+		for (const line of markdown.split('\n')) {
+			if (/^- \[.\] /.test(line)) renderTask(element, line.slice(6), line[3]);
+			else element.createSpan({ text: line });
+		}
+	});
+	let persisted = '## soliloquy\n- 12:00 ^first\n' + content.split('\n').map(line => '\t' + line).join('\n');
+	const actualService = new TimelineService({ vault: { process: async (_file, update) => {
+		persisted = update(persisted);
+	} } }, () => ({ sectionHeading: 'soliloquy' }));
+	h.posts[0].content = content;
+	h.service.updateTask = (...args) => actualService.updateTask(...args);
+	h.service.updatePost = (...args) => actualService.updatePost(...args);
+	await h.panel.refreshTimeline();
+	return { ...h, actualService, errors, persisted: () => persisted };
+}
+
+test('a saved checkbox updates the next edit while another draft defers refresh', async t => {
+	const h = await taskPanelHarness(t);
+	h.edit('second');
+	h.card('first').querySelector('input').click();
+	await settle();
+	assert.match(h.persisted(), /\[x\] Task/);
+	h.edit('first');
+	const draft = h.panel.inlineEditor.active;
+	assert.equal(draft.input.value, '- [x] Task');
+	draft.input.value += ' updated';
+	press('Enter', { ctrlKey: true });
+	await settle();
+	assert.match(h.persisted(), /\[x\] Task updated/);
+	assert.deepEqual(h.errors, []);
+});
+
+test('an edit opened during a task save keeps its snapshot and cannot undo that save', async t => {
+	const h = await taskPanelHarness(t);
+	let finishSave;
+	h.service.updateTask = async (...args) => {
+		await new Promise(resolve => { finishSave = resolve; });
+		await h.actualService.updateTask(...args);
+	};
+	h.card('first').querySelector('input').click();
+	await settle();
+	h.edit('first');
+	const draft = h.panel.inlineEditor.active;
+	draft.input.value += ' edited';
+	finishSave();
+	await settle();
+	assert.match(h.persisted(), /\[x\] Task/);
+	assert.equal(draft.post.content, '- [ ] Task');
+	assert.equal(draft.input.value, '- [ ] Task edited');
+	press('Enter', { ctrlKey: true });
+	await settle();
+	assert.equal(h.errors.length, 1);
+	assert.match(h.errors[0][1].message, /post changed/);
+	assert.match(h.persisted(), /\[x\] Task$/);
+});
+
+test('publishing a completed task save cannot replace a newer shared post', async t => {
+	const h = await taskPanelHarness(t);
+	h.edit('second');
+	const sourcePost = h.panel.posts[0];
+	let publish;
+	h.service.updateTask = async (...args) => {
+		await h.actualService.updateTask(...args);
+		await new Promise(resolve => { publish = resolve; });
+	};
+	h.card('first').querySelector('input').click();
+	await settle();
+	sourcePost.content = '- [x] Newer content';
+	publish();
+	await settle();
+	assert.equal(sourcePost.content, '- [x] Newer content');
+});
+
+test('task verification rejects a same-count mismatch even when both tasks have the same label', async t => {
+	const h = harness(t);
+	const originalRender = MarkdownRenderer.render;
+	t.after(() => { MarkdownRenderer.render = originalRender; });
+	// Simulate a renderer extension hiding the source task and adding an unrelated one.
+	MarkdownRenderer.render = async (_app, _markdown, element) => { renderTask(element, 'Same label'); };
+	let writes = 0;
+	const renderer = new PostCardRenderer(h.app, h.owner, {
+		getReplies: () => [], getPostKey: () => 'test', isFocused: () => false,
+		onTaskChange: async () => { writes++; },
+	});
+	await renderer.render({ content: '- [ ] Same label', date: '2026-09-07', time: '12:00', file: { path: 'daily.md' } }, h.root);
+	const checkbox = h.root.querySelector('input');
+	checkbox.click();
+	await settle();
+	assert.equal(writes, 0);
+	assert.equal(checkbox.checked, false);
+	assert.equal(checkbox.disabled, false);
+});
+
+test('the tabbed quote fixture only updates the task Obsidian actually displays', async t => {
+	const h = harness(t);
+	const originalRender = MarkdownRenderer.render;
+	t.after(() => { MarkdownRenderer.render = originalRender; });
+	// Matches the installed Obsidian renderer: first %% is code, second %% hides B.
+	MarkdownRenderer.render = async (_app, markdown, element) => {
+		element.createEl('pre', { text: '%%' });
+		renderTask(element, 'A', markdown[markdown.indexOf('[') + 1]);
+	};
+	const content = '> \t%%\n> - [ ] A\n> %%\n> - [ ] B';
+	let persisted = '## soliloquy\n- 12:00 ^first\n' + content.split('\n').map(line => '\t' + line).join('\n');
+	const service = new TimelineService({ vault: { process: async (_file, update) => { persisted = update(persisted); } } }, () => ({ sectionHeading: 'soliloquy' }));
+	const renderer = new PostCardRenderer(h.app, h.owner, {
+		getReplies: () => [], getPostKey: () => 'test', isFocused: () => false,
+		onTaskChange: async (post, task, checked, saved) => { await service.updateTask(post, task, checked); saved(); },
+	});
+	await renderer.render({ blockId: 'first', content, date: '2026-09-07', time: '12:00', file: { path: 'daily.md' }, lineStart: 1, lineEnd: 6 }, h.root);
+	h.root.querySelector('input').click();
+	await settle();
+	assert.match(persisted, /\[x\] A/);
+	assert.match(persisted, /\[ \] B/);
+});
+
+for (const prefix of ['-    \t%%\n    ', '1. \t%%\n       ']) {
+	test(`renderer verification recovers tasks with Obsidian list indentation ${JSON.stringify(prefix)}`, async t => {
+		const content = `~~~\n- [ ] example\n~~~\n\n${prefix}- [ ] T0\n\n- [ ] T1`;
+		const h = await taskPanelHarness(t, content, async (_app, markdown, element) => {
+			// Obsidian displays both tasks; Lezer omits T0 for this list indentation.
+			element.createEl('pre', { text: '- [ ] example' });
+			for (const label of ['T0', 'T1']) {
+				const status = /\[([^\r\n])\] T[01]/g;
+				const match = [...markdown.matchAll(status)].find(match => match[0].endsWith(label));
+				if (match) renderTask(element, label, match[1]);
+			}
+		});
+		h.edit('second'); // Keep this card visible so both saves use its updated snapshot.
+		let expected = h.persisted();
+		const checkboxes = [...h.card('first').querySelectorAll('input')];
+		assert.deepEqual(checkboxes.map(checkbox => checkbox.disabled), [false, false]);
+		for (const [index, checkbox] of checkboxes.entries()) {
+			checkbox.click();
+			await settle();
+			expected = expected.replace(`[ ] T${index}`, `[x] T${index}`);
+			assert.equal(h.persisted(), expected);
+			assert.equal(checkbox.checked, true);
+		}
+		assert.deepEqual(h.errors, []);
+	});
+}
+
+test('closing a card during task verification prevents writing and releases the probe component', async t => {
+	const h = harness(t);
+	const originalRender = MarkdownRenderer.render;
+	t.after(() => { MarkdownRenderer.render = originalRender; });
+	let finishProbe;
+	let renderCount = 0;
+	let unloadCount = 0;
+	MarkdownRenderer.render = async (_app, markdown, element, _path, component) => {
+		if (renderCount++) {
+			component.register(() => { unloadCount++; });
+			await new Promise(resolve => { finishProbe = resolve; });
+		}
+		renderTask(element, 'Task', markdown[3]);
+	};
+	let writes = 0;
+	const renderer = new PostCardRenderer(h.app, h.owner, {
+		getReplies: () => [], getPostKey: () => 'test', isFocused: () => false,
+		onTaskChange: async () => { writes++; },
+	});
+	await renderer.render({ content: '- [ ] Task', date: '2026-09-07', time: '12:00', file: { path: 'daily.md' } }, h.root);
+	h.root.querySelector('input').click();
+	renderer.clear();
+	finishProbe();
+	await settle();
+	assert.equal(writes, 0);
+	assert.equal(unloadCount, 1);
+});
+
+test('a refresh error after task persistence keeps the saved checkbox state', async t => {
+	const h = await taskPanelHarness(t);
+	h.service.getPosts = async () => { throw new Error('Read failed'); };
+	const checkbox = h.card('first').querySelector('input');
+	checkbox.click();
+	await settle();
+	assert.match(h.persisted(), /\[x\] Task/);
+	assert.equal(checkbox.checked, true);
+	assert.equal(checkbox.disabled, false);
+	assert.equal(h.errors.length, 1);
+	assert.match(h.errors[0][0], /refresh after updating/);
+});
+
+test('ID assignment during a task save still publishes the matching saved post', async t => {
+	const h = await taskPanelHarness(t);
+	delete h.posts[0].blockId;
+	await h.panel.refreshTimeline();
+	const sourcePost = h.panel.posts[0];
+	let publish;
+	h.service.updateTask = async (...args) => {
+		await new Promise(resolve => { publish = resolve; });
+		await h.actualService.updateTask(...args);
+	};
+	h.edit('second');
+	h.root.querySelector('input.task-list-item-checkbox').click();
+	await settle();
+	// The reply path's ensureBlockId adopts the current ID without changing the body.
+	await h.actualService.ensureBlockId(sourcePost);
+	assert.equal(sourcePost.blockId, 'first');
+	publish();
+	await settle();
+	assert.equal(sourcePost.content, '- [x] Task');
+	const first = h.root.querySelector('.soliloquy-post');
+	first.querySelector('.soliloquy-edit-button').click();
+	assert.equal(h.panel.inlineEditor.active.input.value, '- [x] Task');
 });
 
 test.after(() => dom.window.close());

@@ -394,3 +394,17 @@ test('task updates follow Markdown source positions through code, nested lists a
 		}, true), /task could not be found/);
 	}
 });
+
+test('updating normal and custom tasks preserves Obsidian comments and all other statuses', async () => {
+	const content = '%%\n- [ ] Hidden\n%%\n\n- [ ] Todo\n- [-] Cancelled\n- [/] Doing\n- [?] Question';
+	for (const marker of ['[ ] Todo', '[-] Cancelled', '[/] Doing', '[?] Question']) {
+		for (const checked of [true, false]) {
+			const initial = ['## soliloquy', '- 10:00 ^sol-target', ...content.split('\n').map(line => '\t' + line)].join('\r\n');
+			const h = createHarness(initial);
+			await h.service.updateTask(post({ content }), { markerOffset: content.indexOf(marker) + 1 }, checked);
+			assert.equal(h.getSource(), initial.replace(marker, `[${checked ? 'x' : ' '}]${marker.slice(3)}`));
+		}
+	}
+	const h = createHarness('');
+	await assert.rejects(h.service.updateTask(post({ content }), { markerOffset: content.indexOf('[ ] Hidden') + 1 }, true), /task could not be found/);
+});
