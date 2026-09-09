@@ -34,44 +34,13 @@ const cold = await measureAsync(() => service.getPosts());
 const coldReads = reads;
 const warm = await measureAsync(() => service.getPosts());
 const posts = cold.value;
-const indexBuild = measure(() => new TimelineIndex(posts));
-const index = indexBuild.value;
-const indexedReplyLookup = measure(() => {
-	let replies = 0;
-	for (const post of posts) replies += index.getReplies(post).length;
-	return replies;
-});
-const oldReplyLookup = measure(() => {
-	let replies = 0;
-	for (const post of posts) {
-		if (!post.blockId) continue;
-		replies += posts.filter((candidate) => candidate.replyToBlockId === post.blockId).length;
-	}
-	return replies;
-});
 const terms = ['synthetic', 'benchmark'];
-const indexedSearch = measure(() => posts.filter((post) => {
-	const searchable = index.getSearchText(post);
-	return terms.every((term) => searchable.includes(term));
-}).length);
-const oldSearch = measure(() => posts.filter((post) => {
-	const replies = post.blockId
-		? posts.filter((candidate) => candidate.replyToBlockId === post.blockId)
-		: [];
-	const searchable = `${post.date} ${post.time} ${post.content} ${replies.map((reply) => reply.content).join(' ')}`.toLocaleLowerCase();
-	return terms.every((term) => searchable.includes(term));
-}).length);
+const full = benchmarkPostOperations(posts);
+const { indexBuild, indexedReplyLookup, oldReplyLookup, indexedSearch, oldSearch } = full;
 const scaling = [1_000, 5_000]
 	.filter((size) => size < posts.length)
-	.map((size) => benchmarkPostOperations(posts.slice(0, size)));
-scaling.push({
-	posts: posts.length,
-	indexBuildMs: round(indexBuild.elapsed),
-	indexedReplyLookupMs: round(indexedReplyLookup.elapsed),
-	oldReplyLookupMs: round(oldReplyLookup.elapsed),
-	indexedSearchMs: round(indexedSearch.elapsed),
-	oldSearchMs: round(oldSearch.elapsed),
-});
+	.map((size) => summarizeOperations(benchmarkPostOperations(posts.slice(0, size))));
+scaling.push(summarizeOperations(full));
 
 const result = {
 	vaultPath,
@@ -165,14 +134,14 @@ function round(value) {
 }
 
 function benchmarkPostOperations(sample) {
-	const buildIndex = measure(() => new TimelineIndex(sample));
-	const sampleIndex = buildIndex.value;
-	const indexedReplies = measure(() => {
+	const indexBuild = measure(() => new TimelineIndex(sample));
+	const index = indexBuild.value;
+	const indexedReplyLookup = measure(() => {
 		let replies = 0;
-		for (const post of sample) replies += sampleIndex.getReplies(post).length;
+		for (const post of sample) replies += index.getReplies(post).length;
 		return replies;
 	});
-	const oldReplies = measure(() => {
+	const oldReplyLookup = measure(() => {
 		let replies = 0;
 		for (const post of sample) {
 			if (!post.blockId) continue;
@@ -180,23 +149,30 @@ function benchmarkPostOperations(sample) {
 		}
 		return replies;
 	});
-	const indexedQuery = measure(() => sample.filter((post) => {
-		const searchable = sampleIndex.getSearchText(post);
+	const indexedSearch = measure(() => sample.filter((post) => {
+		const searchable = index.getSearchText(post);
 		return terms.every((term) => searchable.includes(term));
 	}).length);
-	const oldQuery = measure(() => sample.filter((post) => {
+	const oldSearch = measure(() => sample.filter((post) => {
 		const replies = post.blockId
 			? sample.filter((candidate) => candidate.replyToBlockId === post.blockId)
 			: [];
 		const searchable = `${post.date} ${post.time} ${post.content} ${replies.map((reply) => reply.content).join(' ')}`.toLocaleLowerCase();
 		return terms.every((term) => searchable.includes(term));
 	}).length);
+	if (indexedReplyLookup.value !== oldReplyLookup.value || indexedSearch.value !== oldSearch.value) {
+		throw new Error('Indexed and previous implementations returned different results.');
+	}
+	return { posts: sample.length, indexBuild, indexedReplyLookup, oldReplyLookup, indexedSearch, oldSearch };
+}
+
+function summarizeOperations({ posts, indexBuild, indexedReplyLookup, oldReplyLookup, indexedSearch, oldSearch }) {
 	return {
-		posts: sample.length,
-		indexBuildMs: round(buildIndex.elapsed),
-		indexedReplyLookupMs: round(indexedReplies.elapsed),
-		oldReplyLookupMs: round(oldReplies.elapsed),
-		indexedSearchMs: round(indexedQuery.elapsed),
-		oldSearchMs: round(oldQuery.elapsed),
+		posts,
+		indexBuildMs: round(indexBuild.elapsed),
+		indexedReplyLookupMs: round(indexedReplyLookup.elapsed),
+		oldReplyLookupMs: round(oldReplyLookup.elapsed),
+		indexedSearchMs: round(indexedSearch.elapsed),
+		oldSearchMs: round(oldSearch.elapsed),
 	};
 }

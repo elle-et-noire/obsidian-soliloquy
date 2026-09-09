@@ -29,6 +29,12 @@ jobs:
                   RELEASE_TAG: ${{ github.ref_name }}
               run: npm run validate:version -- "$RELEASE_TAG"
 
+            - name: Test plugin
+              run: npm test
+
+            - name: Lint plugin
+              run: npm run lint
+
             - name: Build plugin
               run: npm run build
 

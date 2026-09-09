@@ -33,8 +33,9 @@ The block ID lets Soliloquy locate a post safely after other lines are inserted.
 1. Select the **Open soliloquy** ribbon icon, or run **Soliloquy: Open timeline** from the command palette.
 2. Enter a post and select the send button. You can also press `Ctrl+Enter` (`Control+Enter` on macOS) while the editor is focused.
 3. Select the search button to filter the timeline. Multiple words are matched together.
-4. Use the reply count to open a thread, or the pencil button to edit a post.
-5. Select a date to open its daily note, or a time to jump to that post in the note.
+4. Select a post card, or focus it and press `Enter`, to open its thread.
+5. Select the reply button with the reply count to write a reply, or the pencil button to edit a post.
+6. Select a date to open its daily note, or a time to jump to that post in the note.
 
 In a thread, use the back button or `Alt+Left Arrow` to return to the timeline.
 
@@ -103,10 +104,10 @@ Soliloquy works entirely inside your vault. It does not send network requests, c
 
 ## Development
 
-Node.js 18 or newer and npm are required.
+Use Node.js 24 and npm for development. The supported Node.js ranges are `^20.19.0 || ^22.13.0 || >=24`, as declared in `package.json`.
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
@@ -118,7 +119,7 @@ npm run lint
 npm run build
 ```
 
-The production build creates `main.js` at the repository root. Generated build output and `node_modules` are not committed.
+The production build creates `main.js` at the repository root. Generated build output and `node_modules` are not committed. CI runs the tests, lint, and build on Node.js 20, 22, and 24.
 
 ## Releasing
 
@@ -126,8 +127,9 @@ The production build creates `main.js` at the repository root. Generated build o
 2. Confirm `package.json`, `manifest.json`, and the new `versions.json` entry agree.
 3. Run `npm run validate:version -- <version>`, followed by the test, lint, and build commands above.
 4. Push a tag matching the version exactly, without a `v` prefix (for example, `0.2.0`).
+5. Review the draft GitHub release and its attached files, then publish it.
 
-The release workflow publishes `main.js`, `manifest.json`, and `styles.css` as release assets.
+The release workflow validates the version, runs tests and lint, builds the plugin, and creates a draft release with `main.js`, `manifest.json`, and `styles.css` attached. Publishing the draft is a separate manual step.
 
 ## License
 

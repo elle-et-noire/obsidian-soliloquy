@@ -11,7 +11,7 @@ import { TimelineIndex } from '../services/timeline-index';
 import type { MarkdownTask } from '../services/markdown-tasks';
 import type { TimelinePost } from '../types';
 import { SoliloquyComposer } from './composer';
-import { SoliloquyTextEditor } from './text-editor';
+import { InlinePostEditor } from './inline-post-editor';
 import { captureFocusWithin, shouldRestoreFocusWithin } from './focus-preservation';
 import { PostCardRenderer, type PostContext } from './post-card';
 import { registerTimelineKeyboard } from './timeline-keyboard';
@@ -25,26 +25,15 @@ type NavigationEntry =
 	| { type: 'timeline'; scrollTop: number; focusedPostKey?: string }
 	| { type: 'thread'; post: TimelinePost };
 
-interface InlineDraft {
-	post: TimelinePost;
-	input: SoliloquyTextEditor;
-	button: HTMLButtonElement;
-	saving: boolean;
-}
-
 export class TimelinePanel extends Component {
 	private timelineEl?: HTMLElement;
 	private composer?: SoliloquyComposer;
 	private readonly postRenderer: PostCardRenderer;
 	private posts: TimelinePost[] = [];
 	private postIndex = new TimelineIndex([]);
-	private editing?: InlineDraft & { card: HTMLElement };
-	private replying?: InlineDraft & { stayOnTimeline: boolean };
+	private readonly inlineEditor: InlinePostEditor;
 	private posting = false;
 	private activeThread?: TimelinePost;
-	private inlineReplyComposerEl?: HTMLElement;
-	private inlineReplyButtonEl?: HTMLButtonElement;
-	private inlineReplyPostKey?: string;
 	private focusedPostKey?: string;
 	private readonly navigationHistory: NavigationEntry[] = [];
 	private renderEpoch = 0;
@@ -66,7 +55,10 @@ export class TimelinePanel extends Component {
 			getReplies: (post) => this.postIndex.getReplies(post),
 			getPostKey: (post) => this.postKey(post),
 			isFocused: (post) => this.focusedPostKey === this.postKey(post),
-			onEdit: (card, post) => this.openEditor(card, post),
+			onEdit: (card, post) => {
+				this.focusedPostKey = this.postKey(post);
+				this.inlineEditor.openEdit(card, post);
+			},
 			onFocus: (card, post) => this.focusPost(card, post),
 			onMoveFocus: (card, direction) => this.movePostFocus(card, direction),
 			onOpenDate: (post) => {
@@ -80,11 +72,23 @@ export class TimelinePanel extends Component {
 			onOpenPost: (post) => void this.openDailyNoteAtPost(post),
 			onOpenThread: (post) => void this.openThread(post),
 			onReply: (card, button, post, stayOnTimeline) => {
-				this.openInlineReply(card, button, post, stayOnTimeline);
+				this.inlineEditor.openReply(card, button, post, this.postKey(post), stayOnTimeline);
 			},
 			onSearchTag: (tag) => this.searchForTag(tag),
 			onTaskChange: (post, task, checked) => {
 				void this.saveTaskState(post, task, checked);
+			},
+		});
+		this.inlineEditor = new InlinePostEditor(this.app, this, this.contentEl, this.service, this.postRenderer, {
+			refresh: () => this.refreshTimeline(true),
+			focusTimeline: () => this.focus('view'),
+			onReplySaved: (parent, stayOnTimeline) => {
+				if (stayOnTimeline) {
+					this.activeThread = undefined;
+					this.navigationHistory.length = 0;
+				} else {
+					this.activeThread = this.activeThread ?? this.findThreadRoot(parent);
+				}
 			},
 		});
 		this.register(() => {
@@ -122,7 +126,7 @@ export class TimelinePanel extends Component {
 			},
 		});
 		this.registerDomEvent(root, 'keydown', (event) => this.handlePostContainerKeydown(event));
-		this.registerDomEvent(root.ownerDocument, 'focusin', (event) => this.handleTextFocus(event));
+		this.inlineEditor.registerFocusEvents();
 		await this.refreshTimeline();
 	}
 
@@ -153,16 +157,7 @@ export class TimelinePanel extends Component {
 			void this.submit();
 			return true;
 		}
-		if (this.editing?.input.containsTarget(target)) {
-			void this.saveEdit(this.editing.post, this.editing.input.value);
-			return true;
-		}
-		if (this.replying?.input.containsTarget(target)) {
-			const { post, input, stayOnTimeline } = this.replying;
-			void this.saveReply(post, input.value, stayOnTimeline);
-			return true;
-		}
-		return false;
+		return this.inlineEditor.submitFromShortcut(target);
 	}
 
 	goBack(): boolean {
@@ -173,7 +168,7 @@ export class TimelinePanel extends Component {
 
 	async refreshTimeline(preserveDrafts = false): Promise<void> {
 		if (this.disposed || !this.timelineEl) return;
-		if (preserveDrafts && this.hasOpenEditor()) return;
+		if (preserveDrafts && this.inlineEditor.isOpen()) return;
 		const previousTimelineFocus = captureFocusWithin(this.timelineEl);
 		const epoch = ++this.renderEpoch;
 		this.timelineEl.setAttribute('aria-busy', 'true');
@@ -181,11 +176,10 @@ export class TimelinePanel extends Component {
 			const posts = await this.service.getPosts();
 			if (epoch !== this.renderEpoch) return;
 			// An editor may have opened while the daily notes were being read.
-			if (preserveDrafts && this.hasOpenEditor()) return;
-			this.clearEditor();
+			if (preserveDrafts && this.inlineEditor.isOpen()) return;
+			this.inlineEditor.clear();
 			this.posts = posts;
 			this.postIndex = new TimelineIndex(posts);
-			this.composer?.updateStats(this.posts);
 			if (this.activeThread) {
 				const current = this.findCurrentPost(this.activeThread);
 				if (current) {
@@ -203,23 +197,6 @@ export class TimelinePanel extends Component {
 		}
 	}
 
-	private hasOpenEditor(): boolean {
-		return this.editing !== undefined || this.inlineReplyComposerEl !== undefined;
-	}
-
-	private handleTextFocus(event: FocusEvent): void {
-		const target = event.target as HTMLElement | null;
-		if (!target?.closest) return;
-		const field = target.closest('textarea, input, [contenteditable="true"], [contenteditable=""]');
-		if (!field) return;
-		if (field.tagName === 'INPUT'
-			&& !['text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes((field as HTMLInputElement).type)) return;
-		// Vim prompts and other descendants of the same editor are not a new field.
-		if (this.editing?.input.containsTarget(target) || this.replying?.input.containsTarget(target)) return;
-		if (this.editing) void this.cancelEdit(false);
-		if (this.replying) void this.cancelReply(false);
-	}
-
 	private async renderTimeline(
 		epoch = ++this.renderEpoch,
 		resetVisiblePosts = false,
@@ -228,11 +205,10 @@ export class TimelinePanel extends Component {
 		if (!this.timelineEl) return;
 		this.timelineEl.setAttribute('aria-busy', 'true');
 		this.composer?.element.show();
-		this.closeInlineReply(false);
 		this.timelineEl.removeClass('is-thread-page');
 		this.timelineEl.setAttribute('role', 'feed');
 		this.timelineEl.setAttribute('aria-label', 'Soliloquy timeline');
-		this.clearEditor();
+		this.inlineEditor.clear();
 		if (resetVisiblePosts) this.visiblePostCount = TIMELINE_PAGE_SIZE;
 		const query = this.composer?.getSearchQuery() ?? '';
 		const terms = query.split(/\s+/).filter(Boolean);
@@ -337,7 +313,7 @@ export class TimelinePanel extends Component {
 			const stillPosting = !this.composer?.isSearching() && input.value === submitted;
 			if (stillPosting) this.composer?.clearPost();
 			await this.refreshTimeline(true);
-			if (!this.disposed && stillPosting && !this.composer?.isSearching() && !this.hasOpenEditor()
+			if (!this.disposed && stillPosting && !this.composer?.isSearching() && !this.inlineEditor.isOpen()
 				&& shouldRestoreFocusWithin(this.contentEl, previousFocus)) input.focus();
 		} catch (error) {
 			console.error('Soliloquy: failed to save post', error);
@@ -381,81 +357,6 @@ export class TimelinePanel extends Component {
 		view.editor.focus();
 	}
 
-	private openInlineReply(
-		card: HTMLElement,
-		button: HTMLButtonElement,
-		post: TimelinePost,
-		stayOnTimeline: boolean,
-	): void {
-		const postKey = this.postKey(post);
-		if (this.inlineReplyPostKey === postKey) {
-			void this.cancelReply();
-			return;
-		}
-
-		this.closeInlineReply(false);
-		if (this.editing) void this.cancelEdit(false);
-		const composer = card.createDiv({
-			cls: 'soliloquy-inline-reply-composer',
-			attr: { role: 'group', 'aria-label': `Reply to post from ${post.date} at ${post.time}` },
-		});
-		composer.addEventListener('click', (event) => event.stopPropagation());
-		this.inlineReplyComposerEl = composer;
-		this.inlineReplyButtonEl = button;
-		this.inlineReplyPostKey = postKey;
-		button.setAttribute('aria-expanded', 'true');
-		const input = this.addChild(new SoliloquyTextEditor(this.app, composer, {
-			cls: 'soliloquy-reply-input',
-			placeholder: 'Ctrl + Enter to reply',
-			label: 'Write a reply',
-		}));
-		const actions = composer.createDiv({ cls: 'soliloquy-inline-reply-actions' });
-		const cancel = actions.createEl('button', {
-			attr: { type: 'button', 'aria-label': 'Cancel reply' },
-		});
-		setIcon(cancel, 'x');
-		const submit = actions.createEl('button', {
-			cls: 'mod-cta',
-			attr: { type: 'button', 'aria-label': 'Reply' },
-		});
-		submit.disabled = true;
-		setIcon(submit, 'send');
-		const draft = { post, input, stayOnTimeline, button: submit, saving: false };
-		this.replying = draft;
-		input.onChange = () => { submit.disabled = draft.saving || !input.value.trim(); };
-		cancel.addEventListener('click', (event) => {
-			event.stopPropagation();
-			void this.cancelReply();
-		});
-		submit.addEventListener('click', (event) => {
-			event.stopPropagation();
-			void this.saveReply(post, input.value, stayOnTimeline);
-		});
-		input.focus();
-	}
-
-	private async cancelReply(restoreFocus = true): Promise<void> {
-		this.closeInlineReply(restoreFocus);
-		try {
-			await this.refreshTimeline(true);
-		} catch (error) {
-			console.error('Soliloquy: failed to refresh cancelled reply', error);
-			new Notice('Could not refresh the timeline.');
-		}
-	}
-
-	private closeInlineReply(restoreFocus = true): void {
-		if (this.replying) this.removeChild(this.replying.input);
-		this.replying = undefined;
-		const button = this.inlineReplyButtonEl;
-		button?.setAttribute('aria-expanded', 'false');
-		this.inlineReplyComposerEl?.remove();
-		this.inlineReplyComposerEl = undefined;
-		this.inlineReplyButtonEl = undefined;
-		this.inlineReplyPostKey = undefined;
-		if (restoreFocus) button?.focus();
-	}
-
 	private async openThread(post: TimelinePost): Promise<void> {
 		if (this.activeThread && this.postKey(this.activeThread) === this.postKey(post)) return;
 		const previousTimelineFocus = captureFocusWithin(this.timelineEl!);
@@ -484,9 +385,8 @@ export class TimelinePanel extends Component {
 		previousTimelineFocus: Element | null = null,
 	): Promise<void> {
 		if (!this.timelineEl) return;
-		this.closeInlineReply(false);
 		this.composer?.element.hide();
-		this.clearEditor();
+		this.inlineEditor.clear();
 		this.postRenderer.clear();
 		this.timelineEl.empty();
 		this.timelineEl.addClass('is-thread-page');
@@ -544,35 +444,6 @@ export class TimelinePanel extends Component {
 		window.requestAnimationFrame(() => {
 			if (epoch === this.renderEpoch) this.contentEl.scrollTop = previous.scrollTop;
 		});
-	}
-
-	private async saveReply(
-		parent: TimelinePost,
-		content: string,
-		stayOnTimeline = false,
-	): Promise<void> {
-		const draft = this.replying;
-		if (!draft || draft.post !== parent || draft.saving || !content.trim()) return;
-		this.setDraftSaving(draft, true);
-		try {
-			await this.service.addReply(parent, content);
-			if (this.disposed) return;
-			if (this.replying === draft && draft.input.value === content) {
-				this.closeInlineReply();
-				if (stayOnTimeline) {
-					this.activeThread = undefined;
-					this.navigationHistory.length = 0;
-				} else {
-					this.activeThread = this.activeThread ?? this.findThreadRoot(parent);
-				}
-			}
-			await this.refreshTimeline(true);
-		} catch (error) {
-			console.error('Soliloquy: failed to save reply', error);
-			new Notice('Could not save the reply.');
-		} finally {
-			this.setDraftSaving(draft, false);
-		}
 	}
 
 	private async renderDescendants(
@@ -727,93 +598,6 @@ export class TimelinePanel extends Component {
 
 	private postKey(post: TimelinePost): string {
 		return post.blockId ?? `${post.file.path}:${post.lineStart}:${post.time}`;
-	}
-
-	private openEditor(card: HTMLElement, post: TimelinePost): void {
-		if (this.editing?.card === card) {
-			this.editing.input.focus();
-			return;
-		}
-		if (this.editing) void this.cancelEdit(false);
-		this.closeInlineReply(false);
-		this.focusedPostKey = this.postKey(post);
-		this.postRenderer.releaseCard(card);
-		card.empty();
-		card.setAttribute('role', 'group');
-		card.setAttribute('aria-label', `Edit post from ${post.date} at ${post.time}`);
-		card.removeAttribute('aria-keyshortcuts');
-		const input = this.addChild(new SoliloquyTextEditor(this.app, card, {
-			cls: 'soliloquy-edit-input',
-			placeholder: 'Ctrl + Enter to save',
-			label: 'Edit post',
-			value: post.content,
-		}));
-		const actions = card.createDiv({ cls: 'soliloquy-edit-actions' });
-		const cancel = actions.createEl('button', {
-			attr: { type: 'button', 'aria-label': 'Cancel edit' },
-		});
-		setIcon(cancel, 'x');
-		const save = actions.createEl('button', {
-			cls: 'mod-cta',
-			attr: { type: 'button', 'aria-label': 'Save edit' },
-		});
-		setIcon(save, 'check');
-
-		const draft = { post, input, card, button: save, saving: false };
-		this.editing = draft;
-		save.disabled = !input.value.trim();
-		input.onChange = () => { save.disabled = draft.saving || !input.value.trim(); };
-		cancel.addEventListener('click', () => void this.cancelEdit());
-		save.addEventListener('click', () => void this.saveEdit(post, input.value));
-		input.focus();
-	}
-
-	private clearEditor(): void {
-		const draft = this.editing;
-		this.editing = undefined;
-		if (draft) this.removeChild(draft.input);
-	}
-
-	private async cancelEdit(restoreFocus = true): Promise<void> {
-		const draft = this.editing;
-		if (!draft) return;
-		const previousFocus = captureFocusWithin(this.timelineEl!);
-		this.clearEditor();
-		try {
-			await this.postRenderer.restoreCard(draft.card, draft.post);
-			if (restoreFocus && shouldRestoreFocusWithin(this.contentEl, previousFocus)) this.focus('view');
-			await this.refreshTimeline(true);
-		} catch (error) {
-			console.error('Soliloquy: failed to refresh cancelled edit', error);
-			new Notice('Could not refresh the timeline.');
-		}
-	}
-
-	private async saveEdit(post: TimelinePost, content: string): Promise<void> {
-		const draft = this.editing;
-		if (!draft || draft.post !== post || draft.saving) return;
-		if (!content.trim()) {
-			new Notice('A post cannot be empty.');
-			return;
-		}
-		this.setDraftSaving(draft, true);
-		try {
-			await this.service.updatePost(post, content);
-			if (this.disposed) return;
-			if (this.editing === draft && draft.input.value === content) this.clearEditor();
-			await this.refreshTimeline(true);
-		} catch (error) {
-			console.error('Soliloquy: failed to edit post', error);
-			new Notice('Could not edit the post. Reload the timeline and try again.');
-		} finally {
-			this.setDraftSaving(draft, false);
-		}
-	}
-
-	private setDraftSaving(draft: InlineDraft, saving: boolean): void {
-		draft.saving = saving;
-		draft.button.disabled = saving || !draft.input.value.trim();
-		draft.button.setAttribute('aria-busy', String(saving));
 	}
 
 	private async saveTaskState(

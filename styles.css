@@ -245,14 +245,6 @@
 	background: var(--interactive-accent);
 }
 
-.soliloquy-post-button.is-muted,
-.soliloquy-post-button.is-muted:hover,
-.soliloquy-post-button.is-muted:focus,
-.soliloquy-post-button.is-muted:active {
-	color: var(--text-normal);
-	background: transparent;
-}
-
 .soliloquy-view button,
 .soliloquy-view button:hover,
 .soliloquy-view button:focus,
@@ -267,7 +259,6 @@
 	background: transparent;
 }
 
-.soliloquy-hint,
 .soliloquy-post-meta {
 	color: var(--text-muted);
 	font-size: var(--font-ui-small);
@@ -288,15 +279,6 @@
 	font-weight: 400;
 	line-height: 1.55;
 	letter-spacing: normal;
-}
-
-.soliloquy-view .soliloquy-input::placeholder,
-.soliloquy-view .soliloquy-search::placeholder,
-.soliloquy-view .soliloquy-edit-input::placeholder,
-.soliloquy-view .soliloquy-reply-input::placeholder {
-	font: inherit;
-	color: var(--text-faint);
-	opacity: 1;
 }
 
 .soliloquy-view .soliloquy-search-toggle.is-active,
@@ -577,9 +559,5 @@
 
 	.soliloquy-post {
 		padding: var(--size-4-2) var(--size-4-3);
-	}
-
-	.soliloquy-hint {
-		display: none;
 	}
 }

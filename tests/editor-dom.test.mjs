@@ -361,14 +361,18 @@ test('Ctrl+Enter routes real editor descendants to post, edit, and reply actions
 	const post = { blockId: 'test' };
 	const calls = [];
 	panel.submit = async () => { calls.push(['post']); };
-	panel.saveEdit = async (post, value) => { calls.push(['edit', value]); };
-	panel.saveReply = async (post, value, stay) => { calls.push(['reply', value, stay]); };
+	panel.inlineEditor.save = async () => {
+		const draft = panel.inlineEditor.active;
+		calls.push(draft.kind === 'edit'
+			? ['edit', draft.input.value]
+			: ['reply', draft.input.value, draft.stayOnTimeline]);
+	};
 	h.actions.submit = target => panel.submitFromShortcut(target);
 	for (const field of ['post', 'edit', 'reply']) {
 		const input = h.create();
 		if (field === 'post') panel.composer = { input, isSearching: () => false };
-		if (field === 'edit') panel.editing = { input, post };
-		if (field === 'reply') panel.replying = { post, input, stayOnTimeline: true };
+		if (field === 'edit') panel.inlineEditor.active = { kind: 'edit', input, post };
+		if (field === 'reply') panel.inlineEditor.active = { kind: 'reply', post, input, stayOnTimeline: true };
 		input.focus();
 		press('Enter', { ctrlKey: true });
 		press('Escape');
@@ -419,10 +423,10 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
 test('switching between edits and replies cancels the old field without removing or refocusing the new field', async t => {
 	const h = await panelHarness(t);
 	h.edit('first');
-	const first = h.panel.editing.input;
+	const first = h.panel.inlineEditor.active.input;
 	first.value = 'Discard me';
 	h.edit('second');
-	const second = h.panel.editing.input;
+	const second = h.panel.inlineEditor.active.input;
 	second.value = 'Second draft';
 	await settle();
 	assert.equal(first.view.destroyed, true);
@@ -431,15 +435,15 @@ test('switching between edits and replies cancels the old field without removing
 	assert.equal(second.value, 'Second draft');
 	assert.equal(document.activeElement, second.view.contentDOM);
 	h.reply('first');
-	const reply = h.panel.replying.input;
+	const reply = h.panel.inlineEditor.active.input;
 	await settle();
 	assert.equal(second.view.destroyed, true);
-	assert.equal(h.panel.editing, undefined);
+	assert.equal(h.panel.inlineEditor.active.kind, 'reply');
 	assert.equal(document.activeElement, reply.view.contentDOM);
 	h.edit('second');
 	await settle();
 	assert.equal(reply.view.destroyed, true);
-	assert.equal(h.panel.replying, undefined);
+	assert.equal(h.panel.inlineEditor.active.kind, 'edit');
 	assert.equal(h.root.querySelectorAll('.soliloquy-edit-input').length, 1);
 });
 
@@ -448,7 +452,7 @@ test('another text field cancels an edit or reply while buttons, timeline and th
 	for (const kind of ['edit', 'reply']) {
 		for (const destination of ['composer', 'search', 'note']) {
 			h[kind]('first');
-			const draft = kind === 'edit' ? h.panel.editing : h.panel.replying;
+			const draft = h.panel.inlineEditor.active;
 			draft.input.value = 'Draft';
 			draft.button.focus();
 			assert.equal(draft.input.view.destroyed, false);
@@ -467,8 +471,7 @@ test('another text field cancels an edit or reply while buttons, timeline and th
 			}
 			assert.equal(draft.input.view.destroyed, true);
 			await settle();
-			assert.equal(h.panel.editing, undefined);
-			assert.equal(h.panel.replying, undefined);
+			assert.equal(h.panel.inlineEditor.active, undefined);
 			assert.equal(document.activeElement, target);
 			if (destination === 'note') target.remove();
 		}
@@ -489,8 +492,8 @@ test('slow post/edit/reply saves reject repeated clicks and shortcuts; failures 
 		h.service[method] = () => { calls++; return new Promise((resolve, reject) => { finish = resolve; fail = reject; }); };
 		if (kind === 'post') h.panel.focus('post');
 		else h[kind]('first');
-		const input = kind === 'post' ? h.panel.composer.input : kind === 'edit' ? h.panel.editing.input : h.panel.replying.input;
-		const button = kind === 'post' ? h.root.querySelector('.soliloquy-post-button') : kind === 'edit' ? h.panel.editing.button : h.panel.replying.button;
+		const input = kind === 'post' ? h.panel.composer.input : h.panel.inlineEditor.active.input;
+		const button = kind === 'post' ? h.root.querySelector('.soliloquy-post-button') : h.panel.inlineEditor.active.button;
 		input.value = 'Submit once';
 		button.click();
 		button.click();
@@ -517,16 +520,16 @@ test('a completed save cannot close a newer edit or reply after focus cancelled 
 		let finish;
 		h.service[kind === 'edit' ? 'updatePost' : 'addReply'] = () => new Promise(resolve => { finish = resolve; });
 		h[kind]('first');
-		const original = kind === 'edit' ? h.panel.editing : h.panel.replying;
+		const original = h.panel.inlineEditor.active;
 		original.input.value = 'Sent';
 		original.button.click();
 		h.edit('second');
-		const current = h.panel.editing;
+		const current = h.panel.inlineEditor.active;
 		current.input.value = 'New draft';
 		finish();
 		await settle();
 		assert.equal(original.input.view.destroyed, true);
-		assert.equal(h.panel.editing, current);
+		assert.equal(h.panel.inlineEditor.active, current);
 		assert.equal(current.input.value, 'New draft');
 		assert.equal(document.activeElement, current.input.view.contentDOM);
 		h.panel.focus('post');
@@ -568,7 +571,7 @@ test('text entered while a save is pending stays in the current field', async t 
 		h.service[kind === 'post' ? 'addPost' : kind === 'edit' ? 'updatePost' : 'addReply'] = () => new Promise(resolve => { finish = resolve; });
 		if (kind === 'post') h.panel.focus('post');
 		else h[kind]('first');
-		const input = kind === 'post' ? h.panel.composer.input : kind === 'edit' ? h.panel.editing.input : h.panel.replying.input;
+		const input = kind === 'post' ? h.panel.composer.input : h.panel.inlineEditor.active.input;
 		input.value = 'Submitted text';
 		input.focus();
 		press('Enter', { ctrlKey: true });
@@ -602,13 +605,50 @@ test('focusing an input in another display cancels the first display draft', asy
 	const first = await panelHarness(t);
 	const second = await panelHarness(t);
 	first.reply('first');
-	const oldInput = first.panel.replying.input;
+	const oldInput = first.panel.inlineEditor.active.input;
 	second.edit('second');
-	const newInput = second.panel.editing.input;
+	const newInput = second.panel.inlineEditor.active.input;
 	await settle();
 	assert.equal(oldInput.view.destroyed, true);
 	assert.equal(newInput.view.destroyed, false);
 	assert.equal(document.activeElement, newInput.view.contentDOM);
+});
+
+test('refreshing the timeline updates the displayed statistics once', async t => {
+	const h = await panelHarness(t);
+	const updates = [];
+	const composer = h.panel.composer;
+	const updateStats = composer.updateStats.bind(composer);
+	composer.updateStats = (posts, hits) => {
+		updates.push({ total: posts.length, hits });
+		updateStats(posts, hits);
+	};
+	await h.panel.refreshTimeline();
+	assert.deepEqual(updates, [{ total: 2, hits: 2 }]);
+	assert.equal(h.root.querySelector('[aria-label="Total: 2"]').textContent, '2');
+});
+
+test('an edit or reply save finishing after unload cannot refresh, navigate, or refocus', async t => {
+	for (const kind of ['edit', 'reply']) {
+		const h = await panelHarness(t);
+		let finish;
+		h.service[kind === 'edit' ? 'updatePost' : 'addReply'] = () => new Promise(resolve => { finish = resolve; });
+		h[kind]('first');
+		const draft = h.panel.inlineEditor.active;
+		draft.input.value = 'Sent before closing';
+		draft.button.click();
+		const callbacks = [];
+		h.panel.inlineEditor.callbacks = {
+			refresh: async () => { callbacks.push('refresh'); },
+			focusTimeline: () => { callbacks.push('focus'); },
+			onReplySaved: () => { callbacks.push('navigate'); },
+		};
+		h.panel.unload();
+		finish();
+		await settle();
+		assert.equal(draft.input.view.destroyed, true, kind);
+		assert.deepEqual(callbacks, [], kind);
+	}
 });
 
 test.after(() => dom.window.close());

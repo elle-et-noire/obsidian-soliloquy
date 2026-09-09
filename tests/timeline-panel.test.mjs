@@ -57,13 +57,13 @@ function harness() {
 test('another display updating daily notes cannot discard an edit draft', async () => {
 	const { panel, reads, renders } = harness();
 	const draft = { value: 'Unsaved edit' };
-	panel.editing = { input: draft, post: {} };
+	panel.inlineEditor.active = { kind: 'edit', input: draft, post: {} };
 	await panel.refreshTimeline(true);
-	assert.equal(panel.editing.input, draft);
+	assert.equal(panel.inlineEditor.active.input, draft);
 	assert.equal(reads(), 0);
 	assert.equal(renders(), 0);
-	await panel.cancelEdit();
-	assert.equal(panel.editing, undefined);
+	await panel.inlineEditor.cancel();
+	assert.equal(panel.inlineEditor.active, undefined);
 	assert.equal(reads(), 1);
 	assert.equal(renders(), 1);
 });
@@ -71,12 +71,12 @@ test('another display updating daily notes cannot discard an edit draft', async 
 test('reply drafts survive background updates and cancellation loads fresh posts', async () => {
 	const { panel, renders } = harness();
 	const reply = { remove() {} };
-	panel.inlineReplyComposerEl = reply;
+	panel.inlineEditor.active = { kind: 'reply', element: reply, trigger: { setAttribute() {}, focus() {} } };
 	await panel.refreshTimeline(true);
-	assert.equal(panel.inlineReplyComposerEl, reply);
+	assert.equal(panel.inlineEditor.active.element, reply);
 	assert.equal(renders(), 0);
-	await panel.cancelReply();
-	assert.equal(panel.inlineReplyComposerEl, undefined);
+	await panel.inlineEditor.cancel();
+	assert.equal(panel.inlineEditor.active, undefined);
 	assert.equal(renders(), 1);
 });
 
@@ -86,10 +86,10 @@ test('an editor opened during an asynchronous refresh is preserved', async () =>
 	service.getPosts = () => new Promise(resolve => { finishRead = resolve; });
 	const refreshing = panel.refreshTimeline(true);
 	const draft = { value: 'Typed during read' };
-	panel.editing = { input: draft, post: {} };
+	panel.inlineEditor.active = { kind: 'edit', input: draft, post: {} };
 	finishRead([]);
 	await refreshing;
-	assert.equal(panel.editing.input, draft);
+	assert.equal(panel.inlineEditor.active.input, draft);
 	assert.equal(renders(), 0);
 	assert.equal(attributes.get('aria-busy'), 'false');
 });
