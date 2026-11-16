@@ -35,6 +35,16 @@ The indexed operations stayed close to linear as the fixture size increased:
 | 5,000 | 8.02 ms | 1.32 ms | 1,099.18 ms | 1.89 ms | 916.05 ms |
 | 10,000 | 14.11 ms | 1.95 ms | 2,463.83 ms | 4.03 ms | 4,344.37 ms |
 
+## November 16, 2026: shared timeline snapshot
+
+The service now caches the sorted posts and their index until a post changes, and every open display shares that snapshot. Vault events only notify displays when a note's posts changed, so edits outside the timeline section and the echo of the plugin's own writes do not re-render. On the same fixture (moment is stubbed, as above):
+
+| Operation | Result |
+| --- | ---: |
+| Cold load (100 reads, sort, index) | 60.95 ms |
+| Repeated retrieval without changes | 0.04 ms, 0 reads |
+| Retrieval after editing one post | 19.96 ms, 1 read |
+
 These numbers are diagnostic rather than fixed CI thresholds. The automated tests enforce the structural guarantees: coalesced and serialized settings saves, indexed reply semantics, and a 10,000-post index build under one second.
 
 Full variable-height virtualization is intentionally deferred. Initial Markdown and DOM work is bounded to 50 cards, while the remaining all-post operations complete in tens of milliseconds. Virtualization should be reconsidered if real Obsidian profiling shows scroll degradation after users load hundreds of cards in one session, especially on mobile.

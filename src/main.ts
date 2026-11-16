@@ -1,5 +1,4 @@
-import { Notice, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
-import { parseDailyNoteDate } from './services/daily-note-path';
+import { Notice, Plugin, TFile } from 'obsidian';
 import { SettingsCoordinator } from './services/settings-coordinator';
 import { TimelineService } from './services/timeline-service';
 import {
@@ -13,7 +12,6 @@ import { SoliloquyModal } from './ui/soliloquy-modal';
 export default class SoliloquyPlugin extends Plugin {
 	settings!: SoliloquySettings;
 	service!: TimelineService;
-	private refreshTimer?: number;
 	private settingsCoordinator!: SettingsCoordinator<SoliloquySettings>;
 	private modal?: SoliloquyModal;
 
@@ -23,11 +21,13 @@ export default class SoliloquyPlugin extends Plugin {
 		this.settingsCoordinator = new SettingsCoordinator(
 			500,
 			(snapshot) => this.saveData(snapshot),
-			async (snapshot) => {
-				if (settingsEqual(this.settings, snapshot)) return;
-				this.settings = { ...snapshot };
-				this.service.invalidateAll();
-				await this.refreshViews();
+			(snapshot) => {
+				if (!settingsEqual(this.settings, snapshot)) {
+					this.settings = { ...snapshot };
+					// Open displays refresh through the service's change notification.
+					this.service.invalidateAll();
+				}
+				return Promise.resolve();
 			},
 			(error) => this.reportSettingsError(error),
 		);
@@ -67,31 +67,27 @@ export default class SoliloquyPlugin extends Plugin {
 		});
 		this.addSettingTab(new SoliloquySettingTab(this.app, this));
 
-		this.registerEvent(
-			this.app.vault.on('modify', (file) => this.scheduleRefreshIfDailyNote(file)),
-		);
+		// The service checks changed daily notes and notifies open displays.
+		this.registerEvent(this.app.vault.on('modify', (file) => {
+			if (file instanceof TFile) this.service.fileChanged(file);
+		}));
 		// Vault emits 'create' for every existing file while loading; listen after that.
 		this.app.workspace.onLayoutReady(() => {
-			this.registerEvent(
-				this.app.vault.on('create', (file) => this.scheduleRefreshIfDailyNote(file)),
-			);
+			this.registerEvent(this.app.vault.on('create', (file) => {
+				if (file instanceof TFile) this.service.fileChanged(file);
+			}));
 		});
-		this.registerEvent(
-			this.app.vault.on('delete', (file) => this.scheduleRefreshIfDailyNote(file)),
-		);
-		this.registerEvent(
-			this.app.vault.on('rename', (file, oldPath) => {
-				const wasDailyNote = parseDailyNoteDate(oldPath, this.settings) !== null;
-				this.service.invalidatePath(oldPath);
-				if (file instanceof TFile) this.service.invalidateFile(file);
-				if (wasDailyNote || (file instanceof TFile && this.service.isDailyNote(file))) {
-					this.scheduleRefresh();
-				}
-			}),
-		);
+		this.registerEvent(this.app.vault.on('delete', (file) => {
+			if (file instanceof TFile) this.service.fileRemoved(file.path);
+		}));
+		this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
+			if (!(file instanceof TFile)) return;
+			this.service.fileRemoved(oldPath);
+			this.service.fileChanged(file);
+		}));
 		this.register(() => {
 			this.modal?.close();
-			if (this.refreshTimer !== undefined) window.clearTimeout(this.refreshTimer);
+			this.service.dispose();
 			void this.flushSettings();
 		});
 	}
@@ -147,37 +143,6 @@ export default class SoliloquyPlugin extends Plugin {
 			this.modal = undefined;
 		});
 		this.modal.open();
-	}
-
-	private scheduleRefreshIfDailyNote(file: unknown): void {
-		if (file instanceof TFile && this.service.isDailyNote(file)) {
-			this.service.invalidateFile(file);
-			this.scheduleRefresh();
-		}
-	}
-
-	private scheduleRefresh(): void {
-		if (this.refreshTimer !== undefined) window.clearTimeout(this.refreshTimer);
-		this.refreshTimer = window.setTimeout(() => {
-			this.refreshTimer = undefined;
-			this.refreshViews().catch((error: unknown) => {
-				console.error('Soliloquy: failed to refresh the timeline', error);
-			});
-		}, 100);
-	}
-
-	private async refreshViews(): Promise<void> {
-		await Promise.all([
-			this.modal?.refreshTimeline(),
-			...this.app.workspace
-				.getLeavesOfType(SOLILOQUY_VIEW_TYPE)
-				.map((leaf: WorkspaceLeaf) => {
-					const view = leaf.view;
-					return view instanceof SoliloquyView
-						? view.refreshTimeline()
-						: Promise.resolve();
-				}),
-		]);
 	}
 }
 

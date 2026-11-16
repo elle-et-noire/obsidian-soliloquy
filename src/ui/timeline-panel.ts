@@ -7,7 +7,7 @@ import {
 	setIcon,
 } from 'obsidian';
 import { TimelineUserError } from '../services/errors';
-import type { TimelineService } from '../services/timeline-service';
+import type { TimelineService, TimelineSnapshot } from '../services/timeline-service';
 import { TimelineIndex } from '../services/timeline-index';
 import type { MarkdownTask } from '../services/markdown-tasks';
 import type { TimelinePost } from '../types';
@@ -44,8 +44,8 @@ export class TimelinePanel extends Component {
 	private loadMoreEl?: HTMLElement;
 	private loadingMore = false;
 	private disposed = false;
-	/** Snapshot of the posts last loaded for display, to skip no-op refreshes. */
-	private loadedSignature?: string;
+	/** Service snapshot last loaded for display, to skip no-op refreshes. */
+	private loadedTimeline?: TimelineSnapshot;
 	private scrollLockEpoch?: number;
 
 	constructor(
@@ -129,6 +129,12 @@ export class TimelinePanel extends Component {
 		});
 		this.registerDomEvent(root, 'keydown', (event) => this.handlePostContainerKeydown(event));
 		this.inlineEditor.registerFocusEvents();
+		// Every display, including the one that saved, refreshes on this signal.
+		this.register(this.service.onChange(() => {
+			this.refreshTimeline(true, true).catch((error: unknown) => {
+				console.error('Soliloquy: failed to refresh the timeline', error);
+			});
+		}));
 		await this.refreshTimeline();
 	}
 
@@ -169,9 +175,10 @@ export class TimelinePanel extends Component {
 	}
 
 	/**
-	 * Reloads posts and re-renders. With onlyIfChanged, a refresh whose posts
-	 * match the displayed ones (such as the echo of this display's own save or
-	 * an edit outside the timeline section) leaves the DOM untouched.
+	 * Loads the service snapshot and re-renders. With onlyIfChanged, a refresh
+	 * that finds the snapshot already displayed leaves the DOM untouched.
+	 * Background refreshes preserve open drafts; their changes are shown when
+	 * the draft closes, which refreshes explicitly.
 	 */
 	async refreshTimeline(preserveDrafts = false, onlyIfChanged = false): Promise<void> {
 		if (this.disposed || !this.timelineEl) return;
@@ -180,16 +187,15 @@ export class TimelinePanel extends Component {
 		const epoch = ++this.renderEpoch;
 		this.timelineEl.setAttribute('aria-busy', 'true');
 		try {
-			const posts = await this.service.getPosts();
+			const timeline = await this.service.getTimeline();
 			if (epoch !== this.renderEpoch) return;
 			// An editor may have opened while the daily notes were being read.
 			if (preserveDrafts && this.inlineEditor.isOpen()) return;
-			const signature = postsSignature(posts);
-			if (onlyIfChanged && signature === this.loadedSignature) return;
+			if (onlyIfChanged && timeline === this.loadedTimeline) return;
 			this.inlineEditor.clear();
-			this.posts = posts;
-			this.loadedSignature = signature;
-			this.postIndex = new TimelineIndex(posts);
+			this.loadedTimeline = timeline;
+			this.posts = timeline.posts;
+			this.postIndex = timeline.index;
 			await this.preserveScrollPosition(epoch, async () => {
 				if (this.activeThread) {
 					const current = this.findCurrentPost(this.activeThread);
@@ -688,19 +694,6 @@ export class TimelinePanel extends Component {
 	}
 }
 
-/** Everything that affects how posts render, so equal signatures can skip a render. */
-function postsSignature(posts: TimelinePost[]): string {
-	return posts.map((post) => [
-		post.file.path,
-		post.date,
-		post.time,
-		post.lineStart,
-		post.lineEnd,
-		post.blockId ?? '',
-		post.replyLink ?? '',
-		post.content,
-	].join(' ')).join('');
-}
 
 function nextAnimationFrame(): Promise<void> {
 	return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));

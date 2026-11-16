@@ -43,9 +43,4 @@ export class SoliloquyModal extends Modal {
 	focus(target: SoliloquyFocusTarget = 'view'): void {
 		this.panel?.focus(target);
 	}
-
-	/** Background refresh: keeps drafts and skips the render when nothing changed. */
-	refreshTimeline(): Promise<void> {
-		return this.panel?.refreshTimeline(true, true) ?? Promise.resolve();
-	}
 }

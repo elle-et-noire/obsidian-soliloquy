@@ -21,6 +21,9 @@ const app = {
 			reads += 1;
 			return sources.get(file.path) ?? '';
 		},
+		process: async (file, update) => {
+			sources.set(file.path, update(sources.get(file.path) ?? ''));
+		},
 	},
 };
 const settings = {
@@ -30,10 +33,15 @@ const settings = {
 };
 const service = new TimelineService(app, () => settings);
 
-const cold = await measureAsync(() => service.getPosts());
+const cold = await measureAsync(() => service.getTimeline());
 const coldReads = reads;
-const warm = await measureAsync(() => service.getPosts());
-const posts = cold.value;
+const warm = await measureAsync(() => service.getTimeline());
+const warmReads = reads - coldReads;
+const posts = cold.value.posts;
+// A write rereads only its note, then sorts and indexes every post again.
+await service.updatePost({ ...posts[0] }, `${posts[0].content} (edited)`);
+const writeReads = reads;
+const afterWrite = await measureAsync(() => service.getTimeline());
 const terms = ['synthetic', 'benchmark'];
 const full = benchmarkPostOperations(posts);
 const { indexBuild, indexedReplyLookup, oldReplyLookup, indexedSearch, oldSearch } = full;
@@ -50,7 +58,9 @@ const result = {
 		coldMs: round(cold.elapsed),
 		coldReads,
 		warmMs: round(warm.elapsed),
-		additionalWarmReads: reads - coldReads,
+		additionalWarmReads: warmReads,
+		afterWriteMs: round(afterWrite.elapsed),
+		afterWriteReads: reads - writeReads,
 	},
 	index: {
 		buildMs: round(indexBuild.elapsed),

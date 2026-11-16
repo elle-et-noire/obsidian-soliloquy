@@ -25,6 +25,7 @@ const result = await build({
 		export { SoliloquyComposer } from './src/ui/composer';
 		export { TimelinePanel } from './src/ui/timeline-panel';
 		export { TimelineService } from './src/services/timeline-service';
+		export { TimelineIndex } from './src/services/timeline-index';
 		export { PostChangedError } from './src/services/errors';
 		export { PostCardRenderer } from './src/ui/post-card';
 		export { MarkdownRenderer } from './tests/editor-dom-harness.mjs';
@@ -36,7 +37,7 @@ const result = await build({
 });
 const source = result.outputFiles[0]?.text;
 if (!source) throw new Error('Editor test bundle was not generated.');
-const { SoliloquyTextEditor, SoliloquyComposer, TimelinePanel, TimelineService, PostChangedError, PostCardRenderer, MarkdownRenderer, registerTimelineKeyboard, getCM } = await import(
+const { SoliloquyTextEditor, SoliloquyComposer, TimelinePanel, TimelineService, TimelineIndex, PostChangedError, PostCardRenderer, MarkdownRenderer, registerTimelineKeyboard, getCM } = await import(
 	`data:text/javascript;base64,${Buffer.from(source + '\n//# sourceURL=soliloquy-editor-tests.js').toString('base64')}`
 );
 
@@ -408,8 +409,10 @@ async function panelHarness(t) {
 		blockId, content: `Saved ${blockId}`, date: '2026-09-07', time: '12:00',
 		file: { path: 'daily.md' }, lineStart: 0, lineEnd: 2,
 	}));
+	const listeners = new Set();
 	const service = {
-		getPosts: async () => posts.map(post => ({ ...post })),
+		getTimeline: async () => timelineOf(posts.map(post => ({ ...post }))),
+		onChange: listener => { listeners.add(listener); return () => listeners.delete(listener); },
 		updatePost: async () => {}, addPost: async () => {}, addReply: async () => {},
 	};
 	const panel = h.owner.addChild(new TimelinePanel(h.app, h.root, service));
@@ -419,7 +422,12 @@ async function panelHarness(t) {
 	const card = id => h.root.querySelector(`[data-post-key="${id}"]`);
 	const edit = id => card(id).querySelector('.soliloquy-edit-button').click();
 	const reply = id => card(id).querySelector('.soliloquy-reply-button').click();
-	return { ...h, panel, service, posts, card, edit, reply };
+	const notifyChange = () => { for (const listener of listeners) listener(); };
+	return { ...h, panel, service, posts, card, edit, reply, listeners, notifyChange };
+}
+
+function timelineOf(posts) {
+	return { posts, index: new TimelineIndex(posts) };
 }
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -675,7 +683,7 @@ test('Ctrl+Enter saves an edit and restores keyboard focus to that post', async 
 test('edit save focus restoration leaves a new text field focused during refresh', async t => {
 	const h = await panelHarness(t);
 	let finishRead;
-	h.service.getPosts = () => new Promise(resolve => { finishRead = resolve; });
+	h.service.getTimeline = () => new Promise(resolve => { finishRead = posts => resolve(timelineOf(posts)); });
 	h.edit('first');
 	press('Enter', { ctrlKey: true });
 	await settle();
@@ -993,7 +1001,7 @@ test('closing a card during task verification prevents writing and releases the 
 
 test('a refresh error after task persistence keeps the saved checkbox state', async t => {
 	const h = await taskPanelHarness(t);
-	h.service.getPosts = async () => { throw new Error('Read failed'); };
+	h.service.getTimeline = async () => { throw new Error('Read failed'); };
 	const checkbox = h.card('first').querySelector('input');
 	checkbox.click();
 	await settle();
@@ -1074,3 +1082,42 @@ test('an edit rejected because the post changed shows the current post and keeps
 });
 
 test.after(() => dom.window.close());
+
+test('service change notifications refresh the panel without discarding drafts', async t => {
+	const h = await panelHarness(t);
+	assert.equal(h.listeners.size, 1);
+	h.posts[0].content = 'Changed by sync';
+	h.notifyChange();
+	await settle();
+	assert.equal(h.card('first').querySelector('.soliloquy-post-content').textContent, 'Changed by sync');
+
+	h.edit('second');
+	const draft = h.panel.inlineEditor.active;
+	draft.input.value = 'Unsaved edit';
+	h.posts[0].content = 'Changed again';
+	h.notifyChange();
+	await settle();
+	assert.equal(h.panel.inlineEditor.active, draft);
+	assert.equal(draft.input.value, 'Unsaved edit');
+	assert.equal(h.card('first').querySelector('.soliloquy-post-content').textContent, 'Changed by sync');
+
+	h.panel.unload();
+	assert.equal(h.listeners.size, 0);
+});
+
+test('a save renders its display once although the service also announces it', async t => {
+	const h = await panelHarness(t);
+	let renders = 0;
+	const renderTimeline = h.panel.renderTimeline.bind(h.panel);
+	h.panel.renderTimeline = (...args) => { renders++; return renderTimeline(...args); };
+	h.service.updatePost = async (post, content) => {
+		h.posts.find(item => item.blockId === post.blockId).content = content;
+		h.notifyChange(); // The real service notifies every display after writing.
+	};
+	h.edit('second');
+	h.panel.inlineEditor.active.input.value = 'Saved once';
+	press('Enter', { ctrlKey: true });
+	await settle();
+	assert.equal(h.card('second').querySelector('.soliloquy-post-content').textContent, 'Saved once');
+	assert.equal(renders, 1);
+});

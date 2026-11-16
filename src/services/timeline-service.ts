@@ -5,6 +5,7 @@ import { buildDailyNotePath, parseDailyNoteDate } from './daily-note-path';
 import { PostChangedError } from './errors';
 import { MarkdownFenceTracker } from './markdown-fence';
 import { findMarkdownTasks, type MarkdownTask } from './markdown-tasks';
+import { TimelineIndex } from './timeline-index';
 import {
 	appendPostToTimelineSection,
 	findTimelineSections,
@@ -14,6 +15,22 @@ import {
 const POST_PATTERN = /^- (\d{2}:\d{2})(?:\s+\^([\w-]+))?(?:\s+(.+))?\s*$/;
 const REPLY_LINK_PATTERN = /^\[\[[^\]]*#\^([\w-]+)(?:\|[^\]]+)?\]\]$/;
 
+/** Delay that coalesces bursts of vault events (typing, sync) into one check. */
+const FILE_CHANGE_DELAY_MS = 100;
+
+/** Posts sorted newest first with their index. Shared by every display; do not mutate. */
+export interface TimelineSnapshot {
+	readonly posts: TimelinePost[];
+	readonly index: TimelineIndex;
+}
+
+type TimerWindow = Pick<Window, 'setTimeout' | 'clearTimeout'>;
+
+/**
+ * Reads and writes timeline posts and is the single source of change
+ * notifications: listeners hear about this plugin's writes, settings changes,
+ * and vault changes that alter posts (not edits outside the timeline section).
+ */
 export class TimelineService {
 	private readonly postsByFile = new Map<string, TimelinePost[]>();
 	private readonly pendingReads = new Map<string, Promise<TimelinePost[]>>();
@@ -21,32 +38,141 @@ export class TimelineService {
 	/** Daily-note dates by path; cleared when settings change (invalidateAll). */
 	private readonly datesByPath = new Map<string, string | null>();
 	private cacheEpoch = 0;
+	/** Increases whenever the posts may have changed; tags the cached snapshot. */
+	private version = 0;
+	private snapshot?: { version: number; timeline: Promise<TimelineSnapshot> };
+	private readonly listeners = new Set<() => void>();
+	/** Vault changes awaiting a check: the current file, or null when removed. */
+	private readonly changedFiles = new Map<string, TFile | null>();
+	private changeTimer?: number;
 
 	constructor(
 		private readonly app: App,
 		private readonly getSettings: () => SoliloquySettings,
+		private readonly timerWindow?: TimerWindow,
 	) {}
 
 	isDailyNote(file: TFile): boolean {
 		return file.extension === 'md' && this.dateFromPath(file.path) !== null;
 	}
 
-	invalidateFile(file: TFile): void {
-		this.invalidatePath(file.path);
+	/** Subscribes to timeline changes. Returns the function that unsubscribes. */
+	onChange(listener: () => void): () => void {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
 	}
 
-	invalidatePath(path: string): void {
-		this.postsByFile.delete(path);
-		this.pendingReads.delete(path);
-		this.fileVersions.set(path, (this.fileVersions.get(path) ?? 0) + 1);
+	/** A daily note was created or modified in the vault. */
+	fileChanged(file: TFile): void {
+		if (this.isDailyNote(file)) this.queueFileChange(file.path, file);
 	}
 
+	/** A file was deleted or renamed away from this path. */
+	fileRemoved(path: string): void {
+		if (this.dateFromPath(path) !== null) this.queueFileChange(path, null);
+	}
+
+	/** Settings changed: forget every cached note and notify listeners. */
 	invalidateAll(): void {
 		this.cacheEpoch += 1;
 		this.postsByFile.clear();
 		this.pendingReads.clear();
 		this.fileVersions.clear();
 		this.datesByPath.clear();
+		this.changedFiles.clear();
+		this.clearChangeTimer();
+		this.notifyChanged();
+	}
+
+	dispose(): void {
+		this.clearChangeTimer();
+		this.changedFiles.clear();
+		this.listeners.clear();
+	}
+
+	/**
+	 * Rereads the queued files and notifies listeners only when their posts
+	 * differ from the cached ones. This plugin's own writes were already
+	 * published, so their echoes do not render again.
+	 */
+	async flushFileChanges(): Promise<void> {
+		this.clearChangeTimer();
+		const changes = Array.from(this.changedFiles);
+		this.changedFiles.clear();
+		if (changes.length === 0) return;
+		const epoch = this.cacheEpoch;
+		const results = await Promise.all(changes.map(async ([path, file]) => {
+			const previous = this.postsByFile.get(path);
+			this.forgetPath(path);
+			if (!file) return previous === undefined || previous.length > 0;
+			try {
+				const posts = await this.getFilePosts(file);
+				const unchanged = postsSignature(previous ?? []) === postsSignature(posts);
+				// Keep the cached objects so the current snapshot stays consistent.
+				if (unchanged && previous && this.postsByFile.get(path) === posts) {
+					this.postsByFile.set(path, previous);
+				}
+				return !unchanged;
+			} catch (error) {
+				console.error(`Soliloquy: failed to read ${path}`, error);
+				return true;
+			}
+		}));
+		if (epoch === this.cacheEpoch && results.some(Boolean)) this.notifyChanged();
+	}
+
+	/** Returns the cached snapshot, loading it only after posts changed. */
+	getTimeline(): Promise<TimelineSnapshot> {
+		if (this.snapshot?.version === this.version) return this.snapshot.timeline;
+		const timeline = this.loadTimeline();
+		const snapshot = { version: this.version, timeline };
+		this.snapshot = snapshot;
+		// A failed load must not be served again; callers still see the error.
+		timeline.catch(() => {
+			if (this.snapshot === snapshot) this.snapshot = undefined;
+		});
+		return timeline;
+	}
+
+	private queueFileChange(path: string, file: TFile | null): void {
+		this.changedFiles.set(path, file);
+		this.clearChangeTimer();
+		this.changeTimer = (this.timerWindow ?? window).setTimeout(() => {
+			this.changeTimer = undefined;
+			this.flushFileChanges().catch((error: unknown) => {
+				console.error('Soliloquy: failed to check changed daily notes', error);
+			});
+		}, FILE_CHANGE_DELAY_MS);
+	}
+
+	private clearChangeTimer(): void {
+		if (this.changeTimer === undefined) return;
+		(this.timerWindow ?? window).clearTimeout(this.changeTimer);
+		this.changeTimer = undefined;
+	}
+
+	/** Drops a file's cached posts and any read in progress. */
+	private forgetPath(path: string): void {
+		this.postsByFile.delete(path);
+		this.pendingReads.delete(path);
+		this.fileVersions.set(path, (this.fileVersions.get(path) ?? 0) + 1);
+	}
+
+	/** Records a write by this plugin and publishes it to every display. */
+	private fileWritten(file: TFile): void {
+		this.forgetPath(file.path);
+		this.notifyChanged();
+	}
+
+	private notifyChanged(): void {
+		this.version += 1;
+		for (const listener of Array.from(this.listeners)) {
+			try {
+				listener();
+			} catch (error) {
+				console.error('Soliloquy: timeline change listener failed', error);
+			}
+		}
 	}
 
 	async addPost(content: string): Promise<void> {
@@ -69,7 +195,7 @@ export class TimelineService {
 
 		await this.app.vault.process(file, (source) =>
 			appendPostToTimelineSection(source, heading, line));
-		this.invalidateFile(file);
+		this.fileWritten(file);
 	}
 
 	async updatePost(post: TimelinePost, content: string): Promise<void> {
@@ -104,7 +230,7 @@ export class TimelineService {
 
 		if (!updatedPost) throw new Error('The post could not be updated.');
 		Object.assign(post, updatedPost);
-		this.invalidateFile(post.file);
+		this.fileWritten(post.file);
 	}
 
 	async updateTask(post: TimelinePost, task: MarkdownTask, checked: boolean, options?: { verifiedByRenderer: boolean }): Promise<void> {
@@ -120,7 +246,7 @@ export class TimelineService {
 		await this.updatePost(post, content);
 	}
 
-	async getPosts(): Promise<TimelinePost[]> {
+	private async loadTimeline(): Promise<TimelineSnapshot> {
 		const files = this.app.vault.getMarkdownFiles().filter((file) => this.isDailyNote(file));
 		const currentPaths = new Set(files.map((file) => file.path));
 		for (const path of this.postsByFile.keys()) {
@@ -128,13 +254,8 @@ export class TimelineService {
 		}
 
 		const posts = (await Promise.all(files.map((file) => this.getFilePosts(file)))).flat();
-
-		return posts.sort((a, b) => {
-			const chronological = `${b.date} ${b.time}`.localeCompare(`${a.date} ${a.time}`);
-			if (chronological !== 0) return chronological;
-			if (a.file.path === b.file.path) return b.lineStart - a.lineStart;
-			return b.file.path.localeCompare(a.file.path);
-		});
+		posts.sort(compareNewestFirst);
+		return { posts, index: new TimelineIndex(posts) };
 	}
 
 	private async getFilePosts(file: TFile): Promise<TimelinePost[]> {
@@ -256,7 +377,9 @@ export class TimelineService {
 	private async ensureBlockId(post: TimelinePost): Promise<string> {
 		const proposedBlockId = post.blockId ?? this.createBlockId();
 		let updatedPost: TimelinePost | undefined;
+		let written = false;
 		await this.app.vault.process(post.file, (source) => {
+			written = false;
 			const current = this.findCurrentPost(
 				source,
 				post,
@@ -267,6 +390,7 @@ export class TimelineService {
 				updatedPost = current;
 				return source;
 			}
+			written = true;
 
 			// Only the first line changes, so the body keeps its exact formatting.
 			const firstLine = source.split(/\r?\n/)[current.lineStart] ?? '';
@@ -278,7 +402,7 @@ export class TimelineService {
 
 		if (!updatedPost?.blockId) throw new Error('The parent post could not be identified.');
 		Object.assign(post, updatedPost);
-		this.invalidateFile(post.file);
+		if (written) this.fileWritten(post.file);
 		return updatedPost.blockId;
 	}
 
@@ -383,6 +507,32 @@ function finishPost({ post, inline, body }: ParsedPost): TimelinePost {
 		content: parts.join('\n'),
 		...(body.length > 0 ? { bodyIndent } : {}),
 	};
+}
+
+function compareText(a: string, b: string): number {
+	return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Newest first; posts in one note keep their reverse source order. */
+function compareNewestFirst(a: TimelinePost, b: TimelinePost): number {
+	const chronological = compareText(b.date, a.date) || compareText(b.time, a.time);
+	if (chronological !== 0) return chronological;
+	if (a.file.path === b.file.path) return b.lineStart - a.lineStart;
+	return b.file.path.localeCompare(a.file.path);
+}
+
+/** Everything about a note's posts that affects the timeline, to detect real changes. */
+function postsSignature(posts: TimelinePost[]): string {
+	return posts.map((post) => [
+		post.date,
+		post.time,
+		post.lineStart,
+		post.lineEnd,
+		post.blockId ?? '',
+		post.replyLink ?? '',
+		post.bodyIndent ?? '',
+		post.content,
+	].join('\u0000')).join('\u0001');
 }
 
 /** Normalizes line breaks and outer blank lines without changing indentation. */

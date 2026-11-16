@@ -294,38 +294,176 @@ test('preserves CRLF line endings when appending a post', () => {
 	assert.match(updated, /## soliloquy\r\n- 12:00 \^sol-new\r\n\tNew post\r\n\r\n## next section/);
 });
 
-test('rereads only an invalidated daily note', async () => {
-	const first = { path: 'log/2026/07/2026-07-12.md', extension: 'md' };
-	const second = { path: 'log/2026/07/2026-07-13.md', extension: 'md' };
-	const files = [first, second];
-	const sources = new Map([
-		[first.path, '## soliloquy\n- 09:00 ^sol-first\n\tFirst'],
-		[second.path, '## soliloquy\n- 10:00 ^sol-second\n\tSecond'],
-	]);
+const MANUAL_TIMERS = { setTimeout: () => 1, clearTimeout() {} };
+
+/** A vault of daily notes with reads, writes, and change events under test control. */
+function createVault(entries) {
+	const sources = new Map(entries);
+	const files = new Map(Array.from(sources.keys(), (path) => [path, { path, extension: 'md' }]));
 	const reads = new Map();
-	const service = new TimelineService({
+	let writes = 0;
+	const app = {
 		vault: {
-			getMarkdownFiles: () => files,
+			getMarkdownFiles: () => Array.from(files.values()),
 			cachedRead: async (file) => {
 				reads.set(file.path, (reads.get(file.path) ?? 0) + 1);
 				return sources.get(file.path) ?? '';
 			},
+			process: async (file, update) => {
+				writes++;
+				sources.set(file.path, update(sources.get(file.path) ?? ''));
+			},
 		},
-	}, () => SETTINGS);
+	};
+	const service = new TimelineService(app, () => SETTINGS, MANUAL_TIMERS);
+	let changes = 0;
+	service.onChange(() => { changes++; });
+	return {
+		app, service, sources, files, reads,
+		file: (path) => files.get(path),
+		changes: () => changes,
+		writes: () => writes,
+	};
+}
 
-	const [initial, concurrent] = await Promise.all([service.getPosts(), service.getPosts()]);
-	assert.equal(initial.length, 2);
-	assert.equal(concurrent.length, 2);
-	assert.equal(reads.get(first.path), 1);
-	assert.equal(reads.get(second.path), 1);
+const FIRST = 'log/2026/07/2026-07-12.md';
+const SECOND = 'log/2026/07/2026-07-13.md';
 
-	sources.set(second.path, '## soliloquy\n- 10:00 ^sol-second\n\tUpdated');
-	service.invalidateFile(second);
-	const updated = await service.getPosts();
+test('rereads only a changed daily note', async () => {
+	const vault = createVault([
+		[FIRST, '## soliloquy\n- 09:00 ^sol-first\n\tFirst'],
+		[SECOND, '## soliloquy\n- 10:00 ^sol-second\n\tSecond'],
+	]);
+	const { service, reads } = vault;
 
-	assert.equal(updated[0]?.content, 'Updated');
-	assert.equal(reads.get(first.path), 1);
-	assert.equal(reads.get(second.path), 2);
+	const [initial, concurrent] = await Promise.all([service.getTimeline(), service.getTimeline()]);
+	assert.equal(initial, concurrent);
+	assert.equal(initial.posts.length, 2);
+	assert.equal(reads.get(FIRST), 1);
+	assert.equal(reads.get(SECOND), 1);
+
+	vault.sources.set(SECOND, '## soliloquy\n- 10:00 ^sol-second\n\tUpdated');
+	service.fileChanged(vault.file(SECOND));
+	await service.flushFileChanges();
+	const updated = await service.getTimeline();
+
+	assert.equal(vault.changes(), 1);
+	assert.equal(updated.posts[0]?.content, 'Updated');
+	assert.equal(updated.index.getPostByBlockId('sol-second'), updated.posts[0]);
+	assert.equal(reads.get(FIRST), 1);
+	assert.equal(reads.get(SECOND), 2);
+});
+
+test('the sorted snapshot is shared until posts change', async () => {
+	const vault = createVault([
+		[FIRST, '## soliloquy\n- 09:00 ^sol-a\n\tA\n- 09:00 ^sol-b\n\tB'],
+		[SECOND, '## soliloquy\n- 08:00 ^sol-c\n\tC'],
+	]);
+	const timeline = await vault.service.getTimeline();
+	assert.deepEqual(timeline.posts.map((post) => post.blockId), ['sol-c', 'sol-b', 'sol-a']);
+	assert.equal(await vault.service.getTimeline(), timeline);
+});
+
+test('only vault changes that alter posts notify displays', async () => {
+	const vault = createVault([[SECOND, '# Day\n\n## soliloquy\n- 10:00 ^sol-a\n\tA\n']]);
+	const { service } = vault;
+	await service.getTimeline();
+	// Moving a post changes the lines a later edit targets, so it is a change.
+	vault.sources.set(SECOND, '# Day\nNew notes above\n\n## soliloquy\n- 10:00 ^sol-a\n\tA\n');
+	service.fileChanged(vault.file(SECOND));
+	await service.flushFileChanges();
+	assert.equal(vault.changes(), 1);
+	const current = await service.getTimeline();
+
+	vault.sources.set(SECOND, '# Day\nEdited notes\n\n## soliloquy\n- 10:00 ^sol-a\n\tA\n\n## Other\nText');
+	service.fileChanged(vault.file(SECOND));
+	await service.flushFileChanges();
+	assert.equal(vault.changes(), 1);
+	assert.equal(await service.getTimeline(), current);
+});
+
+test('a write notifies displays once and its vault echo does not notify again', async () => {
+	const vault = createVault([[SECOND, '## soliloquy\n- 10:00 ^sol-a\n\tA']]);
+	const { service } = vault;
+	const [post] = (await service.getTimeline()).posts;
+	await service.updatePost(post, 'Edited');
+	assert.equal(vault.changes(), 1);
+	const updated = await service.getTimeline();
+	assert.equal(updated.posts[0]?.content, 'Edited');
+
+	service.fileChanged(vault.file(SECOND));
+	await service.flushFileChanges();
+	assert.equal(vault.changes(), 1);
+	assert.equal(await service.getTimeline(), updated);
+});
+
+test('identifying a post that already has an ID does not notify displays', async () => {
+	const vault = createVault([[SECOND, '## soliloquy\n- 10:00 ^sol-a\n\tA']]);
+	const [post] = (await vault.service.getTimeline()).posts;
+	assert.equal(await vault.service.ensureBlockId(post), 'sol-a');
+	assert.equal(vault.writes(), 1); // vault.process runs, but the source is unchanged.
+	assert.equal(vault.changes(), 0);
+});
+
+test('removing or renaming a daily note with posts notifies displays', async () => {
+	const vault = createVault([
+		[FIRST, '## soliloquy\n- 09:00 ^sol-first\n\tFirst'],
+		[SECOND, '## soliloquy\n- 10:00 ^sol-second\n\tSecond'],
+	]);
+	const { service } = vault;
+	await service.getTimeline();
+	vault.files.delete(SECOND);
+	service.fileRemoved(SECOND);
+	service.fileRemoved('Notes/unrelated.md');
+	await service.flushFileChanges();
+	assert.equal(vault.changes(), 1);
+	assert.deepEqual((await service.getTimeline()).posts.map((post) => post.blockId), ['sol-first']);
+
+	const renamed = { path: 'Archive/2026-07-12.md', extension: 'md' };
+	vault.files.delete(FIRST);
+	vault.files.set(renamed.path, renamed);
+	service.fileRemoved(FIRST);
+	service.fileChanged(renamed);
+	await service.flushFileChanges();
+	assert.equal(vault.changes(), 2);
+	assert.deepEqual((await service.getTimeline()).posts, []);
+});
+
+test('changing settings notifies displays and rereads every note', async () => {
+	const vault = createVault([[SECOND, '## soliloquy\n- 10:00 ^sol-a\n\tA']]);
+	const timeline = await vault.service.getTimeline();
+	vault.service.invalidateAll();
+	assert.equal(vault.changes(), 1);
+	assert.notEqual(await vault.service.getTimeline(), timeline);
+	assert.equal(vault.reads.get(SECOND), 2);
+});
+
+test('vault events are coalesced, checked after a delay, and stop on dispose', async () => {
+	const vault = createVault([[SECOND, '## soliloquy\n- 10:00 ^sol-a\n\tA']]);
+	const timers = [];
+	const service = new TimelineService(vault.app, () => SETTINGS, {
+		setTimeout: (callback, delay) => { timers.push({ callback, delay }); return timers.length; },
+		clearTimeout: (id) => { timers[id - 1].cleared = true; },
+	});
+	let changes = 0;
+	const unsubscribe = service.onChange(() => { changes++; });
+	await service.getTimeline();
+	vault.sources.set(SECOND, '## soliloquy\n- 10:00 ^sol-a\n\tB');
+	service.fileChanged(vault.file(SECOND));
+	service.fileChanged(vault.file(SECOND));
+	service.fileChanged({ path: 'Notes/unrelated.md', extension: 'md' });
+	assert.deepEqual(timers.map((timer) => [timer.delay, timer.cleared ?? false]), [[100, true], [100, false]]);
+	timers[1].callback();
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(changes, 1);
+	assert.equal((await service.getTimeline()).posts[0]?.content, 'B');
+
+	unsubscribe();
+	service.invalidateAll();
+	assert.equal(changes, 1);
+	service.fileChanged(vault.file(SECOND));
+	service.dispose();
+	assert.equal(timers[2].cleared, true);
 });
 
 test('editing never removes paragraphs, lists or code following a post', async () => {

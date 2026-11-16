@@ -37,10 +37,13 @@ const { TimelinePanel } = await import(
 	`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
 );
 
+const EMPTY_INDEX = { getReplies: () => [], getPostByBlockId: () => undefined, getSearchText: () => '' };
+const timelineOf = posts => ({ posts, index: EMPTY_INDEX });
+
 function harness() {
 	let reads = 0;
 	let renders = 0;
-	const service = { getPosts: async () => { reads++; return []; } };
+	const service = { getTimeline: async () => { reads++; return timelineOf([]); } };
 	const root = { ownerDocument: { activeElement: null } };
 	const panel = new TimelinePanel({}, root, service);
 	panel.postRenderer.restoreCard = async () => {};
@@ -83,11 +86,11 @@ test('reply drafts survive background updates and cancellation loads fresh posts
 test('an editor opened during an asynchronous refresh is preserved', async () => {
 	const { panel, service, attributes, renders } = harness();
 	let finishRead;
-	service.getPosts = () => new Promise(resolve => { finishRead = resolve; });
+	service.getTimeline = () => new Promise(resolve => { finishRead = resolve; });
 	const refreshing = panel.refreshTimeline(true);
 	const draft = { value: 'Typed during read' };
 	panel.inlineEditor.active = { kind: 'edit', input: draft, post: {} };
-	finishRead([]);
+	finishRead(timelineOf([]));
 	await refreshing;
 	assert.equal(panel.inlineEditor.active.input, draft);
 	assert.equal(renders(), 0);
@@ -97,10 +100,10 @@ test('an editor opened during an asynchronous refresh is preserved', async () =>
 test('closing a panel invalidates a pending read and ignores future refreshes', async () => {
 	const { panel, service, renders } = harness();
 	let finishRead;
-	service.getPosts = () => new Promise(resolve => { finishRead = resolve; });
+	service.getTimeline = () => new Promise(resolve => { finishRead = resolve; });
 	const refreshing = panel.refreshTimeline(true);
 	panel.unload();
-	finishRead([]);
+	finishRead(timelineOf([]));
 	await refreshing;
 	await panel.refreshTimeline(true);
 	assert.equal(renders(), 0);
@@ -136,27 +139,20 @@ test('a save finishing after the modal closes cannot refocus its input', async (
 	assert.equal(renders(), 0);
 });
 
-test('background refreshes render only when the displayed posts changed', async () => {
+test('background refreshes render only when the service snapshot changed', async () => {
 	const { panel, service, renders } = harness();
-	const stored = [{
-		file: { path: 'daily.md' }, date: '2026-07-13', time: '10:00',
-		lineStart: 1, lineEnd: 3, blockId: 'sol-a', content: 'One',
-	}];
-	service.getPosts = async () => stored.map((post) => ({ ...post }));
+	let timeline = timelineOf([]);
+	service.getTimeline = async () => timeline;
 	await panel.refreshTimeline(true, true);
 	assert.equal(renders(), 1);
-	// The echo of this display's own save, or an edit elsewhere in the note.
+	// A display that already rendered the current snapshot keeps its DOM.
 	await panel.refreshTimeline(true, true);
 	assert.equal(renders(), 1);
-	stored[0].content = 'Two';
+	timeline = timelineOf([]);
 	await panel.refreshTimeline(true, true);
 	assert.equal(renders(), 2);
-	stored[0].lineStart = 4;
-	stored[0].lineEnd = 6;
-	await panel.refreshTimeline(true, true);
-	assert.equal(renders(), 3);
 	// Explicit refreshes (after saves and cancellations) always render.
 	await panel.refreshTimeline(true);
-	assert.equal(renders(), 4);
+	assert.equal(renders(), 3);
 });
 
