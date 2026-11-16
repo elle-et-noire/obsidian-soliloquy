@@ -135,3 +135,28 @@ test('a save finishing after the modal closes cannot refocus its input', async (
 	assert.equal(cleared, false);
 	assert.equal(renders(), 0);
 });
+
+test('background refreshes render only when the displayed posts changed', async () => {
+	const { panel, service, renders } = harness();
+	const stored = [{
+		file: { path: 'daily.md' }, date: '2026-07-13', time: '10:00',
+		lineStart: 1, lineEnd: 3, blockId: 'sol-a', content: 'One',
+	}];
+	service.getPosts = async () => stored.map((post) => ({ ...post }));
+	await panel.refreshTimeline(true, true);
+	assert.equal(renders(), 1);
+	// The echo of this display's own save, or an edit elsewhere in the note.
+	await panel.refreshTimeline(true, true);
+	assert.equal(renders(), 1);
+	stored[0].content = 'Two';
+	await panel.refreshTimeline(true, true);
+	assert.equal(renders(), 2);
+	stored[0].lineStart = 4;
+	stored[0].lineEnd = 6;
+	await panel.refreshTimeline(true, true);
+	assert.equal(renders(), 3);
+	// Explicit refreshes (after saves and cancellations) always render.
+	await panel.refreshTimeline(true);
+	assert.equal(renders(), 4);
+});
+

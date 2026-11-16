@@ -1,4 +1,5 @@
 import { type App, type Component, Notice, setIcon } from 'obsidian';
+import { PostChangedError, TimelineUserError } from '../services/errors';
 import type { TimelineService } from '../services/timeline-service';
 import { applyPostUpdate } from '../services/post-snapshot';
 import type { TimelinePost } from '../types';
@@ -11,6 +12,15 @@ interface DraftInput {
 	input: SoliloquyTextEditor;
 	button: HTMLButtonElement;
 	saving: boolean;
+	/** Identifies the draft target so closed drafts can be restored. */
+	key: string;
+}
+
+/** Text of a draft that closed without being saved or explicitly cancelled. */
+interface KeptDraft {
+	text: string;
+	/** Post content the draft was written against (edits only). */
+	base?: string;
 }
 
 type InlineDraft = DraftInput & (
@@ -34,6 +44,7 @@ interface InlineEditorCallbacks {
 export class InlinePostEditor {
 	private active?: InlineDraft;
 	private disposed = false;
+	private readonly keptDrafts = new Map<string, KeptDraft>();
 
 	constructor(
 		private readonly app: App,
@@ -54,8 +65,9 @@ export class InlinePostEditor {
 			if (!field) return;
 			if (field.tagName === 'INPUT'
 				&& !['text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes((field as HTMLInputElement).type)) return;
-			// Vim prompts within this editor do not cancel its draft.
-			if (this.active && !this.active.input.containsTarget(target)) void this.cancel(false);
+			// Vim prompts within this editor do not close its draft. Other fields
+			// close it, keeping any changes for when it is opened again.
+			if (this.active && !this.active.input.containsTarget(target)) void this.cancel(false, true);
 		});
 	}
 
@@ -80,8 +92,9 @@ export class InlinePostEditor {
 		card.setAttribute('role', 'group');
 		card.setAttribute('aria-label', `Edit post from ${post.date} at ${post.time}`);
 		card.removeAttribute('aria-keyshortcuts');
+		const key = `edit:${card.dataset.postKey ?? `${post.file.path}:${post.lineStart}:${post.time}`}`;
 		const draft: InlineDraft = {
-			...this.createInput(card, { ...post }, 'edit'),
+			...this.createInput(card, { ...post }, 'edit', key),
 			kind: 'edit', card, sourcePost: post,
 		};
 		this.activate(draft);
@@ -95,7 +108,7 @@ export class InlinePostEditor {
 		stayOnTimeline: boolean,
 	): void {
 		if (this.active?.kind === 'reply' && this.active.postKey === postKey) {
-			void this.cancel();
+			void this.cancel(true, true);
 			return;
 		}
 		this.replaceDraft();
@@ -106,16 +119,22 @@ export class InlinePostEditor {
 		element.addEventListener('click', (event) => event.stopPropagation());
 		trigger.setAttribute('aria-expanded', 'true');
 		const draft: InlineDraft = {
-			...this.createInput(element, post, 'reply'),
+			...this.createInput(element, post, 'reply', `reply:${postKey}`),
 			kind: 'reply', element, trigger, postKey, stayOnTimeline,
 		};
 		this.activate(draft);
 	}
 
-	clear(restoreFocus = false): void {
+	/**
+	 * Closes the open draft. Unless keep is false (saved or explicitly
+	 * cancelled), changed text is kept and restored when the draft reopens.
+	 */
+	clear(restoreFocus = false, keep = true): void {
 		const draft = this.active;
 		this.active = undefined;
 		if (!draft) return;
+		if (keep) this.keepDraft(draft);
+		else this.keptDrafts.delete(draft.key);
 		this.owner.removeChild(draft.input);
 		if (draft.kind === 'reply') {
 			draft.trigger.setAttribute('aria-expanded', 'false');
@@ -127,17 +146,40 @@ export class InlinePostEditor {
 	private replaceDraft(): void {
 		// Restoring an edit inserts its card synchronously. Its later refresh
 		// preserves the new draft that is about to receive focus.
-		if (this.active?.kind === 'edit') void this.cancel(false);
+		if (this.active?.kind === 'edit') void this.cancel(false, true);
 		else this.clear();
 	}
 
-	private createInput(parent: HTMLElement, post: TimelinePost, kind: 'edit' | 'reply'): DraftInput {
+	private keepDraft(draft: InlineDraft): void {
+		// A save in flight owns its text; it is not an abandoned draft.
+		if (draft.saving) return;
+		const text = draft.input.value;
+		const changed = draft.kind === 'edit' ? text !== draft.post.content : text.trim() !== '';
+		if (!changed) {
+			this.keptDrafts.delete(draft.key);
+			return;
+		}
+		this.keptDrafts.set(draft.key, draft.kind === 'edit' ? { text, base: draft.post.content } : { text });
+		if (!this.disposed) new Notice(`Your ${draft.kind} was kept. Open it again to continue.`);
+	}
+
+	private createInput(
+		parent: HTMLElement,
+		post: TimelinePost,
+		kind: 'edit' | 'reply',
+		key: string,
+	): DraftInput {
 		const editing = kind === 'edit';
+		const kept = this.keptDrafts.get(key);
+		this.keptDrafts.delete(key);
+		if (kept && editing && kept.base !== post.content) {
+			new Notice('This post changed after your edit was kept. Review it before saving.');
+		}
 		const input = this.owner.addChild(new SoliloquyTextEditor(this.app, parent, {
 			cls: `soliloquy-${kind}-input`,
 			placeholder: editing ? 'Ctrl + Enter to save' : 'Ctrl + Enter to reply',
 			label: editing ? 'Edit post' : 'Write a reply',
-			value: editing ? post.content : '',
+			value: kept?.text ?? (editing ? post.content : ''),
 		}));
 		const actions = parent.createDiv({ cls: editing ? 'soliloquy-edit-actions' : 'soliloquy-inline-reply-actions' });
 		const cancel = actions.createEl('button', {
@@ -157,7 +199,7 @@ export class InlinePostEditor {
 			event.stopPropagation();
 			void this.save();
 		});
-		return { post, input, button, saving: false };
+		return { post, input, button, saving: false, key };
 	}
 
 	private activate(draft: InlineDraft): void {
@@ -172,11 +214,11 @@ export class InlinePostEditor {
 		draft.button.setAttribute('aria-busy', String(draft.saving));
 	}
 
-	private async cancel(restoreFocus = true): Promise<void> {
+	private async cancel(restoreFocus = true, keep = false): Promise<void> {
 		const draft = this.active;
 		if (!draft) return;
 		const previousFocus = captureFocusWithin(this.root);
-		this.clear(restoreFocus);
+		this.clear(restoreFocus, keep);
 		try {
 			if (draft.kind === 'edit') {
 				await this.renderer.restoreCard(draft.card, draft.sourcePost);
@@ -209,11 +251,12 @@ export class InlinePostEditor {
 				applyPostUpdate(draft.sourcePost, beforeSave, draft.post);
 			}
 			else await this.service.addReply(draft.post, content);
+			if (this.keptDrafts.get(draft.key)?.text === content) this.keptDrafts.delete(draft.key);
 			if (this.disposed) return;
 			// A pending save must not close a newer field or discard additional text.
 			if (this.active === draft && draft.input.value === content) {
 				if (draft.kind === 'edit') previousFocus = captureFocusWithin(draft.card);
-				this.clear(true);
+				this.clear(true, false);
 				if (draft.kind === 'reply') this.callbacks.onReplySaved(draft.post, draft.stayOnTimeline);
 			}
 			await this.callbacks.refresh();
@@ -222,9 +265,20 @@ export class InlinePostEditor {
 			}
 		} catch (error) {
 			console.error(`Soliloquy: failed to save ${draft.kind}`, error);
+			if (error instanceof PostChangedError && this.active === draft && !this.disposed) {
+				// Retrying against the old snapshot cannot succeed: show the current
+				// post and keep the text for when the draft is opened again.
+				const text = draft.input.value;
+				const closing = this.cancel(false, false);
+				this.keptDrafts.set(draft.key, { text, base: draft.post.content });
+				new Notice(`The post changed outside the timeline. Your ${draft.kind} was kept: open it again to review it.`);
+				await closing;
+				return;
+			}
+			const reason = error instanceof TimelineUserError ? ` ${error.message}` : '';
 			new Notice(draft.kind === 'edit'
-				? 'Could not edit the post. Reload the timeline and try again.'
-				: 'Could not save the reply.');
+				? `Could not edit the post.${reason}`
+				: `Could not save the reply.${reason}`);
 		} finally {
 			draft.saving = false;
 			this.updateButton(draft);

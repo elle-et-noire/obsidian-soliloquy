@@ -70,9 +70,12 @@ export default class SoliloquyPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on('modify', (file) => this.scheduleRefreshIfDailyNote(file)),
 		);
-		this.registerEvent(
-			this.app.vault.on('create', (file) => this.scheduleRefreshIfDailyNote(file)),
-		);
+		// Vault emits 'create' for every existing file while loading; listen after that.
+		this.app.workspace.onLayoutReady(() => {
+			this.registerEvent(
+				this.app.vault.on('create', (file) => this.scheduleRefreshIfDailyNote(file)),
+			);
+		});
 		this.registerEvent(
 			this.app.vault.on('delete', (file) => this.scheduleRefreshIfDailyNote(file)),
 		);
@@ -157,7 +160,9 @@ export default class SoliloquyPlugin extends Plugin {
 		if (this.refreshTimer !== undefined) window.clearTimeout(this.refreshTimer);
 		this.refreshTimer = window.setTimeout(() => {
 			this.refreshTimer = undefined;
-			void this.refreshViews();
+			this.refreshViews().catch((error: unknown) => {
+				console.error('Soliloquy: failed to refresh the timeline', error);
+			});
 		}, 100);
 	}
 

@@ -224,13 +224,13 @@ test('matches only an exact H2 heading outside fenced code blocks', () => {
 		'```',
 	].join('\n');
 
-	assert.equal(findTimelineSections(source, '## soliloquy').length, 0);
+	assert.equal(findTimelineSections(source, 'soliloquy').length, 0);
 	const updated = appendPostToTimelineSection(
 		source,
-		'## soliloquy',
+		'soliloquy',
 		'- 12:00 ^sol-new\n\tNew post',
 	);
-	const sections = findTimelineSections(updated, '## soliloquy');
+	const sections = findTimelineSections(updated, 'soliloquy');
 
 	assert.equal(sections.length, 1);
 	assert.deepEqual(sections[0]?.lines.slice(1, 3), [
@@ -251,7 +251,7 @@ test('does not end a timeline section at an H2 inside a code fence', () => {
 		'## actual next section',
 		'Next content',
 	].join('\n');
-	const section = findTimelineSections(source, '## soliloquy')[0];
+	const section = findTimelineSections(source, 'soliloquy')[0];
 
 	assert.ok(section);
 	assert.ok(section.lines.includes('## fenced heading'));
@@ -269,10 +269,10 @@ test('rejects appending when exact timeline headings are duplicated', () => {
 		'\tSecond',
 	].join('\n');
 
-	assert.equal(findTimelineSections(source, '## soliloquy').length, 2);
+	assert.equal(findTimelineSections(source, 'soliloquy').length, 2);
 	assert.throws(
-		() => appendPostToTimelineSection(source, '## soliloquy', '- 12:00 ^sol-new'),
-		/Multiple timeline sections/,
+		() => appendPostToTimelineSection(source, 'soliloquy', '- 12:00 ^sol-new'),
+		/more than one "soliloquy" section/,
 	);
 });
 
@@ -286,12 +286,12 @@ test('preserves CRLF line endings when appending a post', () => {
 	].join('\r\n');
 	const updated = appendPostToTimelineSection(
 		source,
-		'## soliloquy',
+		'soliloquy',
 		'- 12:00 ^sol-new\n\tNew post',
 	);
 
 	assert.equal(updated.replaceAll('\r\n', '').includes('\n'), false);
-	assert.match(updated, /## soliloquy\r\n- 12:00 \^sol-new\r\n\tNew post\r\n## next section/);
+	assert.match(updated, /## soliloquy\r\n- 12:00 \^sol-new\r\n\tNew post\r\n\r\n## next section/);
 });
 
 test('rereads only an invalidated daily note', async () => {
@@ -407,4 +407,76 @@ test('updating normal and custom tasks preserves Obsidian comments and all other
 	}
 	const h = createHarness('');
 	await assert.rejects(h.service.updateTask(post({ content }), { markerOffset: content.indexOf('[ ] Hidden') + 1 }, true), /task could not be found/);
+});
+
+test('edits and task updates keep a space-indented body in its own indentation', async () => {
+	const harness = createHarness([
+		'## soliloquy',
+		'- 10:00 ^sol-target',
+		'    - [ ] Task',
+		'        nested detail',
+		'',
+		'    Closing line',
+		'## next',
+	].join('\n'));
+	const target = post({
+		content: '- [ ] Task\n    nested detail\n\nClosing line',
+		lineStart: 1,
+		lineEnd: 6,
+	});
+
+	await harness.service.updateTask(target, { markerOffset: 3 }, true);
+
+	assert.equal(harness.getSource(), [
+		'## soliloquy',
+		'- 10:00 ^sol-target',
+		'    - [x] Task',
+		'        nested detail',
+		'',
+		'    Closing line',
+		'## next',
+	].join('\n'));
+});
+
+test('editing keeps the indentation of the first content line', async () => {
+	const harness = createHarness(['## soliloquy', '- 10:00 ^sol-target', '\tTarget'].join('\n'));
+
+	await harness.service.updatePost(post({ lineStart: 1, lineEnd: 3 }), '\n    indented code\nnext\n\n');
+
+	assert.equal(harness.getSource(), ['## soliloquy', '- 10:00 ^sol-target', '\t    indented code', '\tnext'].join('\n'));
+});
+
+test('editing a post leaves mixed line endings elsewhere in the note untouched', async () => {
+	const initial = '# Day\r\nintro\n## soliloquy\r\n- 10:00 ^sol-target\r\n\tTarget\r\n## next\nmore\r\n';
+	const harness = createHarness(initial);
+
+	await harness.service.updatePost(post({ lineStart: 3, lineEnd: 5 }), 'Updated');
+
+	assert.equal(harness.getSource(), initial.replace('\tTarget', '\tUpdated'));
+});
+
+test('assigning a block ID changes only the first line of a legacy post', async () => {
+	const initial = ['## soliloquy', '- 10:00 inline text', '    body line', '', '    second paragraph'].join('\n');
+	const harness = createHarness(initial);
+	const legacy = post({
+		content: 'inline text\nbody line\n\nsecond paragraph',
+		blockId: undefined,
+		lineStart: 1,
+		lineEnd: 5,
+	});
+
+	const blockId = await harness.service.ensureBlockId(legacy);
+
+	assert.match(blockId, /^sol-[\w-]+$/);
+	assert.equal(harness.getSource(), initial.replace('- 10:00 inline text', `- 10:00 ^${blockId} inline text`));
+	assert.equal(legacy.blockId, blockId);
+});
+
+test('a post that changed since it was displayed is rejected as a conflict', async () => {
+	const harness = createHarness(['## soliloquy', '- 10:00 ^sol-target', '\tChanged'].join('\n'));
+
+	await assert.rejects(
+		harness.service.updatePost(post(), 'Updated'),
+		{ name: 'PostChangedError' },
+	);
 });

@@ -6,6 +6,7 @@ import {
 	type Scope,
 	setIcon,
 } from 'obsidian';
+import { TimelineUserError } from '../services/errors';
 import type { TimelineService } from '../services/timeline-service';
 import { TimelineIndex } from '../services/timeline-index';
 import type { MarkdownTask } from '../services/markdown-tasks';
@@ -43,6 +44,9 @@ export class TimelinePanel extends Component {
 	private loadMoreEl?: HTMLElement;
 	private loadingMore = false;
 	private disposed = false;
+	/** Snapshot of the posts last loaded for display, to skip no-op refreshes. */
+	private loadedSignature?: string;
+	private scrollLockEpoch?: number;
 
 	constructor(
 		private readonly app: App,
@@ -164,7 +168,12 @@ export class TimelinePanel extends Component {
 		return true;
 	}
 
-	async refreshTimeline(preserveDrafts = false): Promise<void> {
+	/**
+	 * Reloads posts and re-renders. With onlyIfChanged, a refresh whose posts
+	 * match the displayed ones (such as the echo of this display's own save or
+	 * an edit outside the timeline section) leaves the DOM untouched.
+	 */
+	async refreshTimeline(preserveDrafts = false, onlyIfChanged = false): Promise<void> {
 		if (this.disposed || !this.timelineEl) return;
 		if (preserveDrafts && this.inlineEditor.isOpen()) return;
 		const previousTimelineFocus = captureFocusWithin(this.timelineEl);
@@ -175,24 +184,75 @@ export class TimelinePanel extends Component {
 			if (epoch !== this.renderEpoch) return;
 			// An editor may have opened while the daily notes were being read.
 			if (preserveDrafts && this.inlineEditor.isOpen()) return;
+			const signature = postsSignature(posts);
+			if (onlyIfChanged && signature === this.loadedSignature) return;
 			this.inlineEditor.clear();
 			this.posts = posts;
+			this.loadedSignature = signature;
 			this.postIndex = new TimelineIndex(posts);
-			if (this.activeThread) {
-				const current = this.findCurrentPost(this.activeThread);
-				if (current) {
-					this.activeThread = current;
-					await this.renderThreadPage(current, epoch, previousTimelineFocus);
-					return;
+			await this.preserveScrollPosition(epoch, async () => {
+				if (this.activeThread) {
+					const current = this.findCurrentPost(this.activeThread);
+					if (current) {
+						this.activeThread = current;
+						await this.renderThreadPage(current, epoch, previousTimelineFocus);
+						return;
+					}
+					this.activeThread = undefined;
+					this.navigationHistory.length = 0;
+					this.focusedPostKey = undefined;
 				}
-				this.activeThread = undefined;
-				this.navigationHistory.length = 0;
-				this.focusedPostKey = undefined;
-			}
-			await this.renderTimeline(epoch, false, previousTimelineFocus);
+				await this.renderTimeline(epoch, false, previousTimelineFocus);
+			});
 		} finally {
 			if (epoch === this.renderEpoch) this.timelineEl.setAttribute('aria-busy', 'false');
 		}
+	}
+
+	/**
+	 * Keeps the reader's place across a re-render: the first visible card stays
+	 * at the same offset. At the top of the list, new posts stay visible instead.
+	 */
+	private async preserveScrollPosition(epoch: number, render: () => Promise<void>): Promise<void> {
+		const timelineEl = this.timelineEl;
+		const scroller = this.contentEl;
+		if (!timelineEl || !(scroller.scrollTop > 0)) {
+			await render();
+			return;
+		}
+		const scrollTop = scroller.scrollTop;
+		const anchor = this.findScrollAnchor();
+		// Hold the height so emptying the list does not clamp the scroll position.
+		timelineEl.setCssProps({ '--soliloquy-locked-height': `${timelineEl.offsetHeight}px` });
+		timelineEl.addClass('is-height-locked');
+		this.scrollLockEpoch = epoch;
+		try {
+			await render();
+		} finally {
+			if (this.scrollLockEpoch === epoch) {
+				this.scrollLockEpoch = undefined;
+				timelineEl.removeClass('is-height-locked');
+				if (epoch === this.renderEpoch && !this.disposed) {
+					const card = anchor && this.getRenderedPostCards()
+						.find((element) => element.dataset.postKey === anchor.key);
+					scroller.scrollTop = card
+						? scroller.scrollTop + card.getBoundingClientRect().top
+							- scroller.getBoundingClientRect().top - anchor.offset
+						: scrollTop;
+				}
+			}
+		}
+	}
+
+	private findScrollAnchor(): { key: string; offset: number } | undefined {
+		const top = this.contentEl.getBoundingClientRect().top;
+		for (const card of this.getRenderedPostCards()) {
+			const rect = card.getBoundingClientRect();
+			if (rect.bottom > top && card.dataset.postKey) {
+				return { key: card.dataset.postKey, offset: rect.top - top };
+			}
+		}
+		return undefined;
 	}
 
 	private async renderTimeline(
@@ -315,7 +375,9 @@ export class TimelinePanel extends Component {
 				&& shouldRestoreFocusWithin(this.contentEl, previousFocus)) input.focus();
 		} catch (error) {
 			console.error('Soliloquy: failed to save post', error);
-			new Notice('Could not save the post.');
+			new Notice(error instanceof TimelineUserError
+				? `Could not save the post. ${error.message}`
+				: 'Could not save the post.');
 		} finally {
 			this.posting = false;
 			if (!this.disposed) this.composer?.setPosting(false);
@@ -624,6 +686,20 @@ export class TimelinePanel extends Component {
 			new Notice('Task saved, but the timeline could not refresh.');
 		}
 	}
+}
+
+/** Everything that affects how posts render, so equal signatures can skip a render. */
+function postsSignature(posts: TimelinePost[]): string {
+	return posts.map((post) => [
+		post.file.path,
+		post.date,
+		post.time,
+		post.lineStart,
+		post.lineEnd,
+		post.blockId ?? '',
+		post.replyLink ?? '',
+		post.content,
+	].join(' ')).join('');
 }
 
 function nextAnimationFrame(): Promise<void> {
