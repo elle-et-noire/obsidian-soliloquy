@@ -1,43 +1,23 @@
 # Performance testing
 
-Generate a standalone synthetic vault with 10,000 posts across 100 daily notes:
+Generate a standalone synthetic vault with 10,000 posts (1,999 replies, mixed tags and tasks) across 100 daily notes, then measure parsing, reply lookup, search, and initial rendering:
 
 ```bash
 npm run benchmark:generate
-```
-
-Run the parser, reply lookup, search, and initial-render work comparison:
-
-```bash
 npm run benchmark
 ```
 
-The generated vault is written to `.performance-vault` and is ignored by Git. The generator refuses to overwrite an existing directory; remove or rename the previous fixture explicitly before generating another one.
+The vault is written to `.performance-vault`, which Git ignores. The generator refuses to overwrite an existing directory; remove or rename the previous fixture first.
 
-## July 13, 2026 result
+The benchmark stubs `moment`, so it does not include daily-note path detection. These numbers are diagnostic, not CI thresholds. The automated tests enforce the structural guarantees: coalesced and serialized settings saves, indexed reply semantics, and a 10,000-post index build under one second.
 
-The 10,000-post fixture contains 1,999 replies and a mixture of tags and tasks. A single run on the development machine produced:
+## Results
 
-| Operation | Indexed/paged | Previous implementation |
-| --- | ---: | ---: |
-| Cold parse of 100 daily notes | 38.48 ms | 38.48 ms |
-| Warm cached retrieval | 4.21 ms | 4.21 ms |
-| Reply index build | 14.11 ms | n/a |
-| Look up replies for all posts | 1.95 ms | 2,463.83 ms |
-| Search all posts | 4.03 ms | 4,344.37 ms |
-| Initial Markdown renders | 50 | 10,000 |
+Single runs on the development machine with the 10,000-post fixture.
 
-The indexed operations stayed close to linear as the fixture size increased:
+### Timeline snapshot (November 16, 2026)
 
-| Posts | Index build | Indexed reply lookup | Previous reply lookup | Indexed search | Previous search |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,000 | 0.84 ms | 0.27 ms | 29.54 ms | 1.16 ms | 36.62 ms |
-| 5,000 | 8.02 ms | 1.32 ms | 1,099.18 ms | 1.89 ms | 916.05 ms |
-| 10,000 | 14.11 ms | 1.95 ms | 2,463.83 ms | 4.03 ms | 4,344.37 ms |
-
-## November 16, 2026: shared timeline snapshot
-
-The service now caches the sorted posts and their index until a post changes, and every open display shares that snapshot. Vault events only notify displays when a note's posts changed, so edits outside the timeline section and the echo of the plugin's own writes do not re-render. On the same fixture (moment is stubbed, as above):
+The service caches the sorted posts and their index until a post changes, and every open display shares that snapshot. Vault events notify displays only when a note's posts changed, so edits outside the timeline section and the plugin's own writes do not re-render.
 
 | Operation | Result |
 | --- | ---: |
@@ -45,6 +25,18 @@ The service now caches the sorted posts and their index until a post changes, an
 | Repeated retrieval without changes | 0.04 ms, 0 reads |
 | Retrieval after editing one post | 19.96 ms, 1 read |
 
-These numbers are diagnostic rather than fixed CI thresholds. The automated tests enforce the structural guarantees: coalesced and serialized settings saves, indexed reply semantics, and a 10,000-post index build under one second.
+### Reply index and search (July 13, 2026)
 
-Full variable-height virtualization is intentionally deferred. Initial Markdown and DOM work is bounded to 50 cards, while the remaining all-post operations complete in tens of milliseconds. Virtualization should be reconsidered if real Obsidian profiling shows scroll degradation after users load hundreds of cards in one session, especially on mobile.
+Compared with the earlier per-post scan:
+
+| Posts | Index build | Reply lookup (all posts) | Search (all posts) | Previous reply lookup | Previous search |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 0.84 ms | 0.27 ms | 1.16 ms | 29.54 ms | 36.62 ms |
+| 5,000 | 8.02 ms | 1.32 ms | 1.89 ms | 1,099.18 ms | 916.05 ms |
+| 10,000 | 14.11 ms | 1.95 ms | 4.03 ms | 2,463.83 ms | 4,344.37 ms |
+
+Initial rendering is limited to 50 Markdown cards instead of all 10,000.
+
+## Deferred: virtualization
+
+Full variable-height virtualization is intentionally deferred. Initial Markdown and DOM work is bounded to 50 cards, and the remaining all-post operations complete in tens of milliseconds. Reconsider it if profiling in Obsidian shows scroll degradation after loading hundreds of cards, especially on mobile.

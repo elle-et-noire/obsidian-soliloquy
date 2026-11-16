@@ -72,7 +72,6 @@
 .soliloquy-composer {
 	position: sticky;
 	top: 0;
-	inset-block-start: 0;
 	z-index: 10;
 	width: 100%;
 	box-sizing: border-box;
@@ -125,12 +124,10 @@
 
 .soliloquy-search-toggle {
 	color: var(--text-muted);
-	background: transparent;
 }
 
 .soliloquy-search-toggle:hover {
 	color: var(--text-accent);
-	background: transparent;
 }
 
 .soliloquy-view .soliloquy-search-toggle.is-active,
@@ -269,7 +266,6 @@
 	height: 26px;
 	padding: 0;
 	border-radius: 7px;
-	box-shadow: none;
 }
 
 .soliloquy-composer-actions button svg,
@@ -309,10 +305,6 @@
 
 .soliloquy-post:not(.soliloquy-thread-root) {
 	cursor: pointer;
-}
-
-.soliloquy-thread-root {
-	border-color: var(--soliloquy-border);
 }
 
 .soliloquy-post.is-focused {
@@ -379,7 +371,6 @@
 	padding: 0;
 	color: var(--text-muted);
 	background: transparent;
-	box-shadow: none;
 	font: inherit;
 	font-weight: 400;
 	font-variant-numeric: tabular-nums;
@@ -395,7 +386,6 @@
 	margin-left: 0;
 	padding: 0;
 	background: transparent;
-	box-shadow: none;
 	font: inherit;
 	cursor: pointer;
 }
@@ -409,7 +399,6 @@
 	height: 20px;
 	padding: 1px 4px;
 	background: transparent;
-	box-shadow: none;
 	font: inherit;
 	cursor: pointer;
 }
@@ -482,10 +471,6 @@
 .soliloquy-thread-choices {
 	display: grid;
 	gap: 0;
-}
-
-.soliloquy-thread-node.has-next::after {
-	display: none;
 }
 
 .soliloquy-thread-node.is-selected > .soliloquy-post {

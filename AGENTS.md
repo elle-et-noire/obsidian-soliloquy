@@ -5,8 +5,8 @@
 Soliloquy is an Obsidian timeline journal. Posts and replies remain Markdown in daily notes. The plugin supports desktop and mobile and does not require a network service.
 
 - `src/main.ts`: plugin lifecycle, commands, settings persistence, and vault events.
-- `src/services/`: daily-note paths, Markdown parsing and safe updates, caching, reply/search indexing, and settings coordination.
-- `src/ui/`: shared timeline panel, inline edit/reply controller, CodeMirror/Vim input, cards, keyboard routing, and view/modal hosts.
+- `src/services/`: daily-note paths, core Daily notes settings and templates, pure Markdown post/section/task functions (`timeline-markdown.ts`, `markdown-tasks.ts`), the timeline service (I/O, safe updates, caching, change notification), reply/search indexing, and settings coordination.
+- `src/ui/`: the shared timeline panel and its parts (`timeline-list.ts`, `thread-view.ts`, `timeline-surface.ts`, `render-pass.ts`), inline edit/reply controller, CodeMirror/Vim input, cards, keyboard routing, failure reporting, and view/modal hosts (connected through `TimelinePanel.attach`).
 - `src/settings.ts` and `src/types.ts`: settings UI/defaults and shared post types.
 - `tests/`: Node tests, including real CodeMirror/Vim in jsdom and mocked Obsidian hosts.
 - `scripts/`: version validation and performance fixtures/benchmarks. See `PERFORMANCE.md` for measurement details.
