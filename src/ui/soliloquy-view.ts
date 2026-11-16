@@ -48,11 +48,6 @@ export class SoliloquyView extends ItemView {
 		this.panel?.focus(target);
 	}
 
-	/** Background refresh: keeps drafts and skips the render when nothing changed. */
-	refreshTimeline(): Promise<void> {
-		return this.panel?.refreshTimeline(true, true) ?? Promise.resolve();
-	}
-
 	private leaveDisplay(): void {
 		const workspace = this.app.workspace;
 		let destination = workspace.getMostRecentLeaf(workspace.rootSplit);

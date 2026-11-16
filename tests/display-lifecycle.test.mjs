@@ -90,7 +90,7 @@ TimelinePanel.prototype.mount = async function() {
 			input.focus();
 		},
 	};
-	await this.service.getPosts();
+	await this.service.getTimeline();
 };
 
 async function harness(kind) {
@@ -101,7 +101,7 @@ async function harness(kind) {
 		getMostRecentLeaf: () => ({ view: { getViewType: () => 'markdown' } }),
 		setActiveLeaf: () => original.focus(),
 	} };
-	const service = { getPosts: async () => [] };
+	const service = { getTimeline: async () => ({ posts: [] }) };
 	const display = kind === 'modal' ? new SoliloquyModal(app, service, () => {})
 		: new SoliloquyView({ app }, service);
 	if (kind === 'modal') display.open();
@@ -205,14 +205,8 @@ test('following a note link closes the modal without restoring the old focus', a
 	assert.notEqual(document.activeElement, original);
 });
 
-test('each display owns its panel and requests draft-preserving background updates', async () => {
+test('each display owns its panel', async () => {
 	const modal = await harness('modal');
 	const sidebar = await harness('sidebar');
 	assert.notEqual(modal.panel, sidebar.panel);
-	for (const { display, panel } of [modal, sidebar]) {
-		let preserveDrafts;
-		panel.refreshTimeline = preserve => { preserveDrafts = preserve; return Promise.resolve(); };
-		await display.refreshTimeline();
-		assert.equal(preserveDrafts, true);
-	}
 });
