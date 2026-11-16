@@ -27,8 +27,8 @@ const context = await esbuild.context({
 		'@codemirror/search',
 		'@codemirror/state',
 		'@codemirror/view',
-		// Bundle the Markdown parser's common/highlight dependencies so its version
-		// does not depend on the Lezer runtime shipped by the user's Obsidian.
+		'@lezer/common',
+		'@lezer/highlight',
 		'@lezer/lr',
 		...builtinModules,
 	],

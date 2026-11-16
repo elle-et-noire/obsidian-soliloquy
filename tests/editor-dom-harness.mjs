@@ -18,7 +18,11 @@ export class Component {
 }
 
 export const moment = () => ({ format: () => '2026-09-07' });
-export class Notice {}
+/** Messages of the notices shown so far, oldest first. */
+export const notices = [];
+export class Notice {
+	constructor(message) { notices.push(message); }
+}
 export class MarkdownView {}
 export class TFile {}
 export const normalizePath = path => path;
@@ -26,9 +30,25 @@ export class MarkdownRenderer {
 	static async render(_app, markdown, element) { element.textContent = markdown; }
 }
 export function setIcon() {}
+/** Tests switch this to cover macOS shortcuts. */
+export const Platform = { isMacOS: false };
 
 export function installDomHelpers(window) {
+	// Obsidian's popout-aware accessors for a node's document and window.
+	Object.defineProperties(window.Node.prototype, {
+		doc: { configurable: true, get() { return this.ownerDocument ?? this; } },
+		win: { configurable: true, get() { return (this.ownerDocument ?? this).defaultView; } },
+	});
 	const prototype = window.HTMLElement.prototype;
+	/** Tests call `migrateWindow()` where Obsidian reports a move to another window. */
+	prototype.onWindowMigrated = function(listener) {
+		this.windowMigratedListeners ??= new Set();
+		this.windowMigratedListeners.add(listener);
+		return () => this.windowMigratedListeners.delete(listener);
+	};
+	prototype.migrateWindow = function() {
+		for (const listener of this.windowMigratedListeners ?? []) listener(this.win);
+	};
 	prototype.createEl = function(tag, options = {}) {
 		const element = this.ownerDocument.createElement(tag);
 		if (options.cls) element.className = options.cls;

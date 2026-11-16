@@ -28,6 +28,7 @@ const result = await build({
 					export class Notice {}
 					export const moment = () => {};
 					export const setIcon = () => {};
+					export const Platform = { isMacOS: false };
 					export class Component extends KeyboardOwner {
 						addChild(child) { child.load(); return child; }
 						removeChild(child) { child.unload(); }
@@ -51,6 +52,12 @@ const result = await build({
 							this.modalEl = { addClass() {} };
 							this.titleEl = { hide() {} };
 							this.contentEl = createRoot(app.document);
+							// The container holds the modal frame around the content.
+							this.containerEl = {
+								nodeType: 1,
+								focus: () => { app.document.activeElement = this.containerEl; },
+								contains: element => element === this.containerEl || this.contentEl.contains(element),
+							};
 						}
 						setTitle(title) { this.title = title; }
 						open() {
@@ -196,9 +203,28 @@ test('tab focus skips other Soliloquy panes and blurs if there is no destination
 	}
 });
 
+test('a focused modal container keeps the shortcuts while other panes keep their keys', async () => {
+	const modal = await harness('modal');
+	modal.display.containerEl.focus();
+	press(modal.display.scope, modal.root, { key: '/' });
+	assert.equal(modal.document.activeElement, modal.panel.composer.input);
+	modal.display.containerEl.focus();
+	press(modal.display.scope, modal.root);
+	assert.equal(modal.display.closed, true);
+
+	const sidebar = await harness('sidebar');
+	sidebar.original.nodeType = 1;
+	sidebar.original.focus();
+	for (const key of ['/', 'Escape']) {
+		assert.equal(press(sidebar.display.scope, sidebar.root, { key }).defaultPrevented, false);
+		assert.equal(sidebar.document.activeElement, sidebar.original);
+	}
+	await sidebar.display.onClose();
+});
+
 test('following a note link closes the modal without restoring the old focus', async () => {
 	const { display, panel, document, original } = await harness('modal');
-	panel.onNavigate();
+	panel.host.onNavigate();
 	assert.equal(display.closed, true);
 	assert.equal(display.shouldRestoreSelection, false);
 	assert.equal(panel.loaded, false);

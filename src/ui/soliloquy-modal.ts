@@ -1,5 +1,6 @@
-import { App, Modal, Notice, Scope } from 'obsidian';
+import { App, Modal, Scope } from 'obsidian';
 import type { TimelineService } from '../services/timeline-service';
+import { runDetached } from './report-failure';
 import { TimelinePanel, type SoliloquyFocusTarget } from './timeline-panel';
 
 export class SoliloquyModal extends Modal {
@@ -19,18 +20,19 @@ export class SoliloquyModal extends Modal {
 	}
 
 	onOpen(): void {
-		const panel = new TimelinePanel(this.app, this.contentEl, this.service, () => {
-			// Following a note link should focus its destination when the modal closes.
-			this.shouldRestoreSelection = false;
-			this.close();
-		});
-		this.panel = panel;
-		panel.load();
-		panel.registerKeyboard(this.scope, () => this.close());
-		void panel.mount().catch((error: unknown) => {
-			console.error('Soliloquy: failed to open modal timeline', error);
-			if (this.panel === panel) new Notice('Could not load the timeline.');
-		});
+		this.panel = new TimelinePanel(this.app, this.contentEl, this.service);
+		const panel = this.panel;
+		runDetached(() => panel.attach({
+			scope: this.scope,
+			// Obsidian may focus the modal itself rather than an element in the panel.
+			keyboardBoundary: this.containerEl,
+			leaveDisplay: () => this.close(),
+			onNavigate: () => {
+				// Following a note link should focus its destination when the modal closes.
+				this.shouldRestoreSelection = false;
+				this.close();
+			},
+		}), 'open the timeline');
 	}
 
 	onClose(): void {

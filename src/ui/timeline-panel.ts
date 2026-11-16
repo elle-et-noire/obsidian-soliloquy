@@ -4,7 +4,6 @@ import {
 	MarkdownView,
 	Notice,
 	type Scope,
-	setIcon,
 } from 'obsidian';
 import { TimelineUserError } from '../services/errors';
 import type { TimelineService, TimelineSnapshot } from '../services/timeline-service';
@@ -14,69 +13,92 @@ import type { TimelinePost } from '../types';
 import { SoliloquyComposer } from './composer';
 import { InlinePostEditor } from './inline-post-editor';
 import { captureFocusWithin, shouldRestoreFocusWithin } from './focus-preservation';
-import { PostCardRenderer, type PostContext } from './post-card';
+import { PostCardRenderer } from './post-card';
+import { RenderPasses } from './render-pass';
+import { runDetached } from './report-failure';
+import { ThreadView } from './thread-view';
 import { registerTimelineKeyboard } from './timeline-keyboard';
+import { TimelineList } from './timeline-list';
+import { postKey, TimelineSurface } from './timeline-surface';
 
 export type SoliloquyFocusTarget = 'view' | 'search' | 'post';
 
-const TIMELINE_PAGE_SIZE = 50;
-const RENDER_BATCH_SIZE = 8;
+/** What a view or modal supplies when it shows a timeline panel. */
+export interface TimelinePanelHost {
+	/** Receives the display's keyboard shortcuts. */
+	scope: Scope;
+	/**
+	 * Element whose focused descendants receive those shortcuts, when the host
+	 * owns more than the panel (e.g. a modal container). Defaults to the panel.
+	 */
+	keyboardBoundary?: HTMLElement;
+	/** Moves focus out of the display, e.g. on Escape outside inputs. */
+	leaveDisplay: () => void;
+	/** Runs before the panel opens a note or link in the workspace. */
+	onNavigate?: () => void;
+}
 
-type NavigationEntry =
-	| { type: 'timeline'; scrollTop: number; focusedPostKey?: string }
-	| { type: 'thread'; post: TimelinePost };
+const EMPTY_TIMELINE: TimelineSnapshot = { posts: [], index: new TimelineIndex([]) };
 
 export class TimelinePanel extends Component {
-	private timelineEl?: HTMLElement;
 	private composer?: SoliloquyComposer;
 	private readonly postRenderer: PostCardRenderer;
-	private posts: TimelinePost[] = [];
-	private postIndex = new TimelineIndex([]);
 	private readonly inlineEditor: InlinePostEditor;
+	private readonly surface: TimelineSurface;
+	private readonly list: TimelineList;
+	private readonly thread: ThreadView;
+	/** One cancellation signal per render pass; unloading cancels the latest. */
+	private readonly passes = new RenderPasses();
+	private host?: TimelinePanelHost;
 	private posting = false;
-	private activeThread?: TimelinePost;
-	private focusedPostKey?: string;
-	private readonly navigationHistory: NavigationEntry[] = [];
-	private renderEpoch = 0;
-	private timelineResults: TimelinePost[] = [];
-	private visiblePostCount = TIMELINE_PAGE_SIZE;
-	private renderedTimelineCount = 0;
-	private loadMoreEl?: HTMLElement;
-	private loadingMore = false;
 	private disposed = false;
 	/** Service snapshot last loaded for display, to skip no-op refreshes. */
-	private loadedTimeline?: TimelineSnapshot;
-	private scrollLockEpoch?: number;
+	private loadedTimeline = EMPTY_TIMELINE;
 
 	constructor(
 		private readonly app: App,
 		readonly contentEl: HTMLElement,
 		private readonly service: TimelineService,
-		private readonly onNavigate?: () => void,
 	) {
 		super();
 		this.postRenderer = new PostCardRenderer(this.app, this, {
-			getReplies: (post) => this.postIndex.getReplies(post),
-			getPostKey: (post) => this.postKey(post),
-			isFocused: (post) => this.focusedPostKey === this.postKey(post),
+			getReplies: (post) => this.loadedTimeline.index.getReplies(post),
+			getPostKey: postKey,
+			isFocused: (post) => this.surface.isFocused(post),
 			onEdit: (card, post) => {
-				this.focusedPostKey = this.postKey(post);
+				this.surface.focusedPostKey = postKey(post);
 				this.inlineEditor.openEdit(card, post);
 			},
-			onFocus: (card, post) => this.focusPost(card, post),
+			onFocus: (card, post) => this.surface.markFocused(card, post),
 			onMoveFocus: (card, direction) => this.movePostFocus(card, direction),
 			onOpenDate: (post) => {
-				this.onNavigate?.();
-				void this.app.workspace.getLeaf('tab').openFile(post.file, { active: true });
+				this.host?.onNavigate?.();
+				runDetached(
+					() => this.app.workspace.getLeaf('tab').openFile(post.file, { active: true }),
+					`open ${post.file.path}`,
+					'Could not open the daily note.',
+				);
 			},
 			onOpenLink: (destination, post) => {
-				this.onNavigate?.();
-				void this.app.workspace.openLinkText(destination, post.file.path, true);
+				this.host?.onNavigate?.();
+				runDetached(
+					() => this.app.workspace.openLinkText(destination, post.file.path, true),
+					`open the link ${destination}`,
+					'Could not open the link.',
+				);
 			},
-			onOpenPost: (post) => void this.openDailyNoteAtPost(post),
-			onOpenThread: (post) => void this.openThread(post),
+			onOpenPost: (post) => runDetached(
+				() => this.openDailyNoteAtPost(post),
+				`open the post in ${post.file.path}`,
+				'Could not open the daily note.',
+			),
+			onOpenThread: (post) => runDetached(
+				() => this.thread.open(post),
+				'open the thread',
+				'Could not open the thread.',
+			),
 			onReply: (card, button, post, stayOnTimeline) => {
-				this.inlineEditor.openReply(card, button, post, this.postKey(post), stayOnTimeline);
+				this.inlineEditor.openReply(card, button, post, postKey(post), stayOnTimeline);
 			},
 			onSearchTag: (tag) => this.searchForTag(tag),
 			onTaskChange: (post, task, checked, saved) => this.saveTaskState(post, task, checked, saved),
@@ -84,42 +106,69 @@ export class TimelinePanel extends Component {
 		this.inlineEditor = new InlinePostEditor(this.app, this, this.contentEl, this.service, this.postRenderer, {
 			refresh: () => this.refreshTimeline(true),
 			focusTimeline: () => this.focus('view'),
-			onReplySaved: (parent, stayOnTimeline) => {
-				if (stayOnTimeline) {
-					this.activeThread = undefined;
-					this.navigationHistory.length = 0;
-				} else {
-					this.activeThread = this.activeThread ?? this.findThreadRoot(parent);
-				}
+			onReplySaved: (parent, stayOnTimeline) => this.thread.onReplySaved(parent, stayOnTimeline),
+		});
+		this.surface = new TimelineSurface(this.contentEl, this.postRenderer, {
+			closeDraft: () => this.inlineEditor.clear(),
+			setComposerShown: (shown) => {
+				if (shown) this.composer?.element.show();
+				else this.composer?.element.hide();
 			},
+		});
+		this.list = new TimelineList(this.surface, {
+			getTimeline: () => this.loadedTimeline,
+			getSearchQuery: () => this.composer?.getSearchQuery() ?? '',
+			updateStats: (posts, hits) => this.composer?.updateStats(posts, hits),
+		});
+		this.thread = new ThreadView(this.surface, this.passes, {
+			getTimeline: () => this.loadedTimeline,
+			renderTimeline: (signal, previousFocus) => this.list.render(signal, false, previousFocus),
 		});
 		this.register(() => {
 			this.disposed = true;
-			this.renderEpoch++;
+			this.passes.cancel();
 			this.postRenderer.clear();
 		});
 	}
 
-	registerKeyboard(scope: Scope, leaveDisplay: () => void): void {
-		registerTimelineKeyboard(this, scope, this.contentEl, {
+	/**
+	 * Shows the panel in its host: loads it unless the host already added it
+	 * as a child, routes the host's keys, and renders the timeline. The host
+	 * unloads the panel when it closes. Resolves once the first render ends;
+	 * a failure is reported instead of rejecting.
+	 */
+	async attach(host: TimelinePanelHost): Promise<void> {
+		this.host = host;
+		this.load();
+		registerTimelineKeyboard(this, host.scope, this.contentEl, {
 			focus: (target) => this.focus(target),
-			leaveDisplay,
+			leaveDisplay: host.leaveDisplay,
 			submit: (target) => this.submitFromShortcut(target),
-			goBack: () => this.goBack(),
-		});
+			goBack: () => this.thread.goBack(),
+		}, host.keyboardBoundary);
+		try {
+			await this.mount();
+		} catch (error) {
+			console.error('Soliloquy: failed to open timeline', error);
+			if (!this.disposed) new Notice('Could not load the timeline.');
+		}
 	}
 
-	async mount(): Promise<void> {
+	private async mount(): Promise<void> {
 		const root = this.contentEl;
 		root.empty();
 		root.addClass('soliloquy-view');
 		root.tabIndex = -1;
 
 		this.composer = new SoliloquyComposer(this.app, root, this, {
-			onPost: () => void this.submit(),
-			onSearchChange: () => void this.renderTimeline(undefined, true),
+			onPost: () => runDetached(() => this.submit(), 'save the post', 'Could not save the post.'),
+			onSearchChange: () => runDetached(
+				() => this.list.render(this.passes.start(), true),
+				'search the timeline',
+				'Could not search the timeline.',
+			),
 		});
-		this.timelineEl = root.createDiv({
+		this.surface.timelineEl = root.createDiv({
 			cls: 'soliloquy-timeline',
 			attr: {
 				role: 'feed',
@@ -130,28 +179,24 @@ export class TimelinePanel extends Component {
 		this.registerDomEvent(root, 'keydown', (event) => this.handlePostContainerKeydown(event));
 		this.inlineEditor.registerFocusEvents();
 		// Every display, including the one that saved, refreshes on this signal.
-		this.register(this.service.onChange(() => {
-			this.refreshTimeline(true, true).catch((error: unknown) => {
-				console.error('Soliloquy: failed to refresh the timeline', error);
-			});
-		}));
+		// A background refresh is logged only; the service reports unreadable notes.
+		this.register(this.service.onChange(() => runDetached(
+			() => this.refreshTimeline(true, true),
+			'refresh the timeline',
+		)));
 		await this.refreshTimeline();
 	}
 
 	focus(target: SoliloquyFocusTarget = 'view'): void {
 		if (this.disposed) return;
 		if (target === 'view') {
-			const card = this.timelineEl?.querySelector<HTMLElement>(
-				'.soliloquy-post.is-focused[data-post-key]',
-			);
-			(card ?? this.contentEl).focus({ preventScroll: true });
+			(this.surface.getFocusedCard() ?? this.contentEl).focus({ preventScroll: true });
 			return;
 		}
 		if (!this.composer) return;
 
-		const wasThread = this.activeThread !== undefined;
-		this.activeThread = undefined;
-		this.navigationHistory.length = 0;
+		const wasThread = this.thread.isOpen();
+		this.thread.close();
 		this.composer.element.show();
 		const searchMode = target === 'search';
 		const modeChanged = this.composer.isSearching() !== searchMode;
@@ -162,16 +207,10 @@ export class TimelinePanel extends Component {
 	submitFromShortcut(target: EventTarget | null): boolean {
 		if (this.disposed) return false;
 		if (this.composer?.input.containsTarget(target) && !this.composer.isSearching()) {
-			void this.submit();
+			runDetached(() => this.submit(), 'save the post', 'Could not save the post.');
 			return true;
 		}
 		return this.inlineEditor.submitFromShortcut(target);
-	}
-
-	goBack(): boolean {
-		if (!this.activeThread) return false;
-		void this.navigateBack();
-		return true;
 	}
 
 	/**
@@ -181,186 +220,26 @@ export class TimelinePanel extends Component {
 	 * the draft closes, which refreshes explicitly.
 	 */
 	async refreshTimeline(preserveDrafts = false, onlyIfChanged = false): Promise<void> {
-		if (this.disposed || !this.timelineEl) return;
+		const timelineEl = this.surface.timelineEl;
+		if (this.disposed || !timelineEl) return;
 		if (preserveDrafts && this.inlineEditor.isOpen()) return;
-		const previousTimelineFocus = captureFocusWithin(this.timelineEl);
-		const epoch = ++this.renderEpoch;
-		this.timelineEl.setAttribute('aria-busy', 'true');
+		const previousTimelineFocus = captureFocusWithin(timelineEl);
+		const signal = this.passes.start();
+		timelineEl.setAttribute('aria-busy', 'true');
 		try {
 			const timeline = await this.service.getTimeline();
-			if (epoch !== this.renderEpoch) return;
+			if (signal.aborted) return;
 			// An editor may have opened while the daily notes were being read.
 			if (preserveDrafts && this.inlineEditor.isOpen()) return;
 			if (onlyIfChanged && timeline === this.loadedTimeline) return;
 			this.inlineEditor.clear();
 			this.loadedTimeline = timeline;
-			this.posts = timeline.posts;
-			this.postIndex = timeline.index;
-			await this.preserveScrollPosition(epoch, async () => {
-				if (this.activeThread) {
-					const current = this.findCurrentPost(this.activeThread);
-					if (current) {
-						this.activeThread = current;
-						await this.renderThreadPage(current, epoch, previousTimelineFocus);
-						return;
-					}
-					this.activeThread = undefined;
-					this.navigationHistory.length = 0;
-					this.focusedPostKey = undefined;
-				}
-				await this.renderTimeline(epoch, false, previousTimelineFocus);
+			await this.surface.preserveScrollPosition(signal, async () => {
+				if (await this.thread.refresh(signal, previousTimelineFocus)) return;
+				await this.list.render(signal, false, previousTimelineFocus);
 			});
 		} finally {
-			if (epoch === this.renderEpoch) this.timelineEl.setAttribute('aria-busy', 'false');
-		}
-	}
-
-	/**
-	 * Keeps the reader's place across a re-render: the first visible card stays
-	 * at the same offset. At the top of the list, new posts stay visible instead.
-	 */
-	private async preserveScrollPosition(epoch: number, render: () => Promise<void>): Promise<void> {
-		const timelineEl = this.timelineEl;
-		const scroller = this.contentEl;
-		if (!timelineEl || !(scroller.scrollTop > 0)) {
-			await render();
-			return;
-		}
-		const scrollTop = scroller.scrollTop;
-		const anchor = this.findScrollAnchor();
-		// Hold the height so emptying the list does not clamp the scroll position.
-		timelineEl.setCssProps({ '--soliloquy-locked-height': `${timelineEl.offsetHeight}px` });
-		timelineEl.addClass('is-height-locked');
-		this.scrollLockEpoch = epoch;
-		try {
-			await render();
-		} finally {
-			if (this.scrollLockEpoch === epoch) {
-				this.scrollLockEpoch = undefined;
-				timelineEl.removeClass('is-height-locked');
-				if (epoch === this.renderEpoch && !this.disposed) {
-					const card = anchor && this.getRenderedPostCards()
-						.find((element) => element.dataset.postKey === anchor.key);
-					scroller.scrollTop = card
-						? scroller.scrollTop + card.getBoundingClientRect().top
-							- scroller.getBoundingClientRect().top - anchor.offset
-						: scrollTop;
-				}
-			}
-		}
-	}
-
-	private findScrollAnchor(): { key: string; offset: number } | undefined {
-		const top = this.contentEl.getBoundingClientRect().top;
-		for (const card of this.getRenderedPostCards()) {
-			const rect = card.getBoundingClientRect();
-			if (rect.bottom > top && card.dataset.postKey) {
-				return { key: card.dataset.postKey, offset: rect.top - top };
-			}
-		}
-		return undefined;
-	}
-
-	private async renderTimeline(
-		epoch = ++this.renderEpoch,
-		resetVisiblePosts = false,
-		previousTimelineFocus: Element | null = null,
-	): Promise<void> {
-		if (!this.timelineEl) return;
-		this.timelineEl.setAttribute('aria-busy', 'true');
-		this.composer?.element.show();
-		this.timelineEl.removeClass('is-thread-page');
-		this.timelineEl.setAttribute('role', 'feed');
-		this.timelineEl.setAttribute('aria-label', 'Soliloquy timeline');
-		this.inlineEditor.clear();
-		if (resetVisiblePosts) this.visiblePostCount = TIMELINE_PAGE_SIZE;
-		const query = this.composer?.getSearchQuery() ?? '';
-		const terms = query.split(/\s+/).filter(Boolean);
-		const posts = terms.length === 0
-			? this.posts
-			: this.posts.filter((post) => {
-				const searchable = this.postIndex.getSearchText(post);
-				return terms.every((term) => searchable.includes(term));
-			});
-		this.composer?.updateStats(this.posts, posts.length);
-		this.timelineResults = posts;
-		const focusedPost = posts.find((post) => this.postKey(post) === this.focusedPostKey)
-			?? posts[0];
-		this.focusedPostKey = focusedPost ? this.postKey(focusedPost) : undefined;
-		this.renderedTimelineCount = 0;
-		this.loadMoreEl = undefined;
-		this.postRenderer.clear();
-		this.timelineEl.empty();
-		if (posts.length === 0) {
-			this.timelineEl.createDiv({
-				text: terms.length > 0 ? 'No matching posts.' : 'No posts yet.',
-				cls: 'soliloquy-empty',
-				attr: { role: 'status' },
-			});
-			if (epoch === this.renderEpoch) this.timelineEl.setAttribute('aria-busy', 'false');
-			return;
-		}
-		const initialCount = Math.min(this.visiblePostCount, posts.length);
-		try {
-			await this.renderPostBatch(posts.slice(0, initialCount), epoch);
-			if (epoch !== this.renderEpoch) return;
-			this.renderedTimelineCount = initialCount;
-			this.renderLoadMoreControl(epoch);
-			this.restoreRenderedPostFocus(previousTimelineFocus, false);
-		} finally {
-			if (epoch === this.renderEpoch) {
-				this.timelineEl.setAttribute('aria-busy', 'false');
-			}
-		}
-	}
-
-	private async renderPostBatch(posts: TimelinePost[], epoch: number): Promise<void> {
-		if (!this.timelineEl) return;
-		for (let index = 0; index < posts.length; index += RENDER_BATCH_SIZE) {
-			if (epoch !== this.renderEpoch) return;
-			const batch = posts.slice(index, index + RENDER_BATCH_SIZE);
-			await Promise.all(batch.map((post) => this.renderPost(post, this.timelineEl!)));
-			if (epoch !== this.renderEpoch) return;
-			if (index + RENDER_BATCH_SIZE < posts.length) await nextAnimationFrame();
-		}
-	}
-
-	private renderLoadMoreControl(epoch: number): void {
-		this.loadMoreEl?.remove();
-		this.loadMoreEl = undefined;
-		if (!this.timelineEl || this.renderedTimelineCount >= this.timelineResults.length) return;
-		const remaining = this.timelineResults.length - this.renderedTimelineCount;
-		const amount = Math.min(TIMELINE_PAGE_SIZE, remaining);
-		const control = this.timelineEl.createDiv({ cls: 'soliloquy-load-more' });
-		this.loadMoreEl = control;
-		const button = control.createEl('button', {
-			text: `Load ${amount} older posts`,
-			attr: {
-				type: 'button',
-				'aria-label': `Load ${amount} older posts; ${remaining} remaining`,
-			},
-		});
-		button.addEventListener('click', () => void this.loadMorePosts(epoch, button));
-	}
-
-	private async loadMorePosts(epoch: number, button?: HTMLButtonElement): Promise<void> {
-		if (this.loadingMore || epoch !== this.renderEpoch || !this.timelineEl) return;
-		this.loadingMore = true;
-		if (button) button.disabled = true;
-		const start = this.renderedTimelineCount;
-		const end = Math.min(start + TIMELINE_PAGE_SIZE, this.timelineResults.length);
-		this.loadMoreEl?.remove();
-		this.loadMoreEl = undefined;
-		this.timelineEl.setAttribute('aria-busy', 'true');
-		try {
-			await this.renderPostBatch(this.timelineResults.slice(start, end), epoch);
-			if (epoch !== this.renderEpoch) return;
-			this.renderedTimelineCount = end;
-			this.visiblePostCount = end;
-			this.renderLoadMoreControl(epoch);
-		} finally {
-			this.loadingMore = false;
-			if (epoch === this.renderEpoch) this.timelineEl.setAttribute('aria-busy', 'false');
+			if (!signal.aborted) timelineEl.setAttribute('aria-busy', 'false');
 		}
 	}
 
@@ -391,23 +270,14 @@ export class TimelinePanel extends Component {
 	}
 
 	private searchForTag(tag: string): void {
-		this.activeThread = undefined;
-		this.navigationHistory.length = 0;
-		this.focusedPostKey = undefined;
+		this.thread.close();
+		this.surface.focusedPostKey = undefined;
 		this.composer?.element.show();
 		this.composer?.searchFor(tag);
 	}
 
-	private async renderPost(
-		post: TimelinePost,
-		container: HTMLElement,
-		context: PostContext = 'timeline',
-	): Promise<void> {
-		await this.postRenderer.render(post, container, context);
-	}
-
 	private async openDailyNoteAtPost(post: TimelinePost): Promise<void> {
-		this.onNavigate?.();
+		this.host?.onNavigate?.();
 		const leaf = this.app.workspace.getLeaf('tab');
 		await leaf.openFile(post.file, { active: true });
 
@@ -423,207 +293,37 @@ export class TimelinePanel extends Component {
 		view.editor.focus();
 	}
 
-	private async openThread(post: TimelinePost): Promise<void> {
-		if (this.activeThread && this.postKey(this.activeThread) === this.postKey(post)) return;
-		const previousTimelineFocus = captureFocusWithin(this.timelineEl!);
-		if (this.activeThread) {
-			this.navigationHistory.push({ type: 'thread', post: this.activeThread });
-		} else {
-			this.navigationHistory.push({
-				type: 'timeline',
-				scrollTop: this.contentEl.scrollTop,
-				focusedPostKey: this.focusedPostKey,
-			});
-		}
-		const epoch = ++this.renderEpoch;
-		this.activeThread = post;
-		this.focusedPostKey = this.postKey(post);
-		await this.renderThreadPage(
-			post,
-			epoch,
-			previousTimelineFocus ?? this.contentEl.ownerDocument.body,
-		);
-	}
-
-	private async renderThreadPage(
-		post: TimelinePost,
-		epoch: number,
-		previousTimelineFocus: Element | null = null,
-	): Promise<void> {
-		if (!this.timelineEl) return;
-		this.composer?.element.hide();
-		this.inlineEditor.clear();
-		this.postRenderer.clear();
-		this.timelineEl.empty();
-		this.timelineEl.addClass('is-thread-page');
-		this.timelineEl.setAttribute('role', 'region');
-		this.timelineEl.setAttribute('aria-label', 'Soliloquy thread');
-		const navigation = this.timelineEl.createDiv({ cls: 'soliloquy-thread-navigation' });
-		const back = navigation.createEl('button', {
-			cls: 'soliloquy-back-button',
-			attr: {
-				type: 'button',
-				'aria-label': 'Back',
-				'aria-keyshortcuts': 'Alt+ArrowLeft',
-			},
-		});
-		setIcon(back, 'arrow-left');
-		back.addEventListener('click', () => void this.navigateBack());
-
-		const thread = this.timelineEl.createDiv({ cls: 'soliloquy-thread' });
-		const path = this.findAncestorPath(post);
-		for (const ancestor of path) {
-			const node = thread.createDiv({ cls: 'soliloquy-thread-node is-ancestor has-next' });
-			await this.renderPost(ancestor, node, 'reply');
-			if (epoch !== this.renderEpoch) return;
-		}
-
-		const selectedNode = thread.createDiv({ cls: 'soliloquy-thread-node is-selected' });
-		await this.renderPost(post, selectedNode, 'root');
-		if (epoch !== this.renderEpoch) return;
-		const visited = new Set(path.map((item) => this.postKey(item)));
-		visited.add(this.postKey(post));
-		await this.renderDescendants(thread, selectedNode, post, epoch, visited);
-		if (epoch !== this.renderEpoch) return;
-		this.restoreRenderedPostFocus(previousTimelineFocus, true);
-	}
-
-	private async navigateBack(): Promise<void> {
-		const previousTimelineFocus = captureFocusWithin(this.timelineEl!);
-		const epoch = ++this.renderEpoch;
-		let previous = this.navigationHistory.pop();
-		while (previous?.type === 'thread') {
-			const post = this.findCurrentPost(previous.post);
-			if (post) {
-				this.activeThread = post;
-				this.focusedPostKey = this.postKey(post);
-				await this.renderThreadPage(post, epoch, previousTimelineFocus);
-				return;
-			}
-			previous = this.navigationHistory.pop();
-		}
-
-		this.activeThread = undefined;
-		this.focusedPostKey = previous?.focusedPostKey;
-		await this.renderTimeline(epoch, false, previousTimelineFocus);
-		if (epoch !== this.renderEpoch || previous?.type !== 'timeline') return;
-		window.requestAnimationFrame(() => {
-			if (epoch === this.renderEpoch) this.contentEl.scrollTop = previous.scrollTop;
-		});
-	}
-
-	private async renderDescendants(
-		container: HTMLElement,
-		parentNode: HTMLElement,
-		parent: TimelinePost,
-		epoch: number,
-		visited: Set<string>,
-	): Promise<void> {
-		const children = this.findChildren(parent).filter((child) => !visited.has(this.postKey(child)));
-		if (children.length === 0) return;
-
-		if (children.length === 1) {
-			const child = children[0];
-			if (!child) return;
-			const key = this.postKey(child);
-			visited.add(key);
-			parentNode.addClass('has-next');
-			const node = container.createDiv({ cls: 'soliloquy-thread-node is-descendant' });
-			await this.renderPost(child, node, 'reply');
-			if (epoch !== this.renderEpoch) return;
-			await this.renderDescendants(container, node, child, epoch, visited);
-			return;
-		}
-
-		const choices = container.createDiv({ cls: 'soliloquy-thread-choices' });
-		for (const child of children) {
-			const node = choices.createDiv({ cls: 'soliloquy-thread-node is-choice' });
-			await this.renderPost(child, node, 'reply');
-			if (epoch !== this.renderEpoch) return;
-		}
-	}
-
-	private findChildren(parent: TimelinePost): TimelinePost[] {
-		return this.postIndex.getReplies(parent);
-	}
-
-	private findThreadRoot(post: TimelinePost): TimelinePost {
-		let current = post;
-		const visited = new Set<string>();
-		while (current.replyToBlockId && !visited.has(this.postKey(current))) {
-			visited.add(this.postKey(current));
-			const parent = this.postIndex.getPostByBlockId(current.replyToBlockId);
-			if (!parent) break;
-			current = parent;
-		}
-		return current;
-	}
-
-	private findAncestorPath(post: TimelinePost): TimelinePost[] {
-		const ancestors: TimelinePost[] = [];
-		let current = post;
-		const visited = new Set<string>([this.postKey(post)]);
-		while (current.replyToBlockId) {
-			const parent = this.postIndex.getPostByBlockId(current.replyToBlockId);
-			if (!parent || visited.has(this.postKey(parent))) break;
-			ancestors.unshift(parent);
-			visited.add(this.postKey(parent));
-			current = parent;
-		}
-		return ancestors;
-	}
-
-	private findCurrentPost(post: TimelinePost): TimelinePost | undefined {
-		if (post.blockId) return this.postIndex.getPostByBlockId(post.blockId);
-		return this.posts.find((candidate) =>
-			candidate.file.path === post.file.path
-			&& candidate.time === post.time
-			&& candidate.content === post.content,
-		);
-	}
-
-	private focusPost(card: HTMLElement, post: TimelinePost): void {
-		this.focusedPostKey = this.postKey(post);
-		this.timelineEl
-			?.querySelectorAll('.soliloquy-post.is-focused')
-			.forEach((element) => element.removeClass('is-focused'));
-		card.addClass('is-focused');
-	}
-
 	private movePostFocus(card: HTMLElement, direction: -1 | 1): boolean {
-		const cards = this.getRenderedPostCards();
+		const cards = this.surface.getRenderedPostCards();
 		const currentIndex = cards.indexOf(card);
 		if (currentIndex < 0) return false;
 
 		const nextCard = cards[currentIndex + direction];
 		if (nextCard) {
-			this.focusCard(nextCard, true, 'nearest');
+			this.surface.focusCard(nextCard, true, 'nearest');
 			return true;
 		}
 
-		const canLoadMore = direction === 1
-			&& !this.activeThread
-			&& this.renderedTimelineCount < this.timelineResults.length;
+		const canLoadMore = direction === 1 && !this.thread.isOpen() && this.list.hasMore();
 		if (!canLoadMore) return false;
-		if (this.loadingMore) return true;
+		if (this.list.isLoadingMore) return true;
 
-		const epoch = this.renderEpoch;
-		void this.loadMorePosts(epoch).then(() => {
-			if (epoch !== this.renderEpoch || card.ownerDocument.activeElement !== card) return;
-			const updatedCards = this.getRenderedPostCards();
+		const signal = this.passes.current;
+		runDetached(async () => {
+			await this.list.loadMore(signal);
+			if (signal.aborted || card.ownerDocument.activeElement !== card) return;
+			const updatedCards = this.surface.getRenderedPostCards();
 			const updatedIndex = updatedCards.indexOf(card);
 			const loadedNextCard = updatedCards[updatedIndex + 1];
-			if (loadedNextCard) this.focusCard(loadedNextCard, true, 'nearest');
-		});
+			if (loadedNextCard) this.surface.focusCard(loadedNextCard, true, 'nearest');
+		}, 'load older posts', 'Could not load older posts.');
 		return true;
 	}
 
 	private handlePostContainerKeydown(event: KeyboardEvent): void {
-		if (event.target !== this.contentEl && event.target !== this.timelineEl) return;
+		if (event.target !== this.contentEl && event.target !== this.surface.timelineEl) return;
 		if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
-		const focusedCard = this.timelineEl?.querySelector<HTMLElement>(
-			'.soliloquy-post.is-focused[data-post-key]',
-		);
+		const focusedCard = this.surface.getFocusedCard();
 		if (!focusedCard) return;
 		const direction = event.key === 'ArrowUp' ? -1 : 1;
 		if (!this.movePostFocus(focusedCard, direction)) return;
@@ -631,50 +331,14 @@ export class TimelinePanel extends Component {
 		event.stopPropagation();
 	}
 
-	private getRenderedPostCards(): HTMLElement[] {
-		return Array.from(
-			this.timelineEl?.querySelectorAll<HTMLElement>('.soliloquy-post[data-post-key]') ?? [],
-		);
-	}
-
-	private focusCard(
-		card: HTMLElement,
-		scroll: boolean,
-		block: ScrollLogicalPosition,
-	): void {
-		card.focus({ preventScroll: true });
-		if (scroll) {
-			const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-				? 'auto'
-				: 'smooth';
-			window.requestAnimationFrame(() => card.scrollIntoView({ behavior, block }));
-		}
-	}
-
-	private restoreRenderedPostFocus(
-		previousTimelineFocus: Element | null,
-		scroll: boolean,
-	): void {
-		if (!shouldRestoreFocusWithin(this.contentEl, previousTimelineFocus)) return;
-		const card = this.timelineEl?.querySelector<HTMLElement>(
-			'.soliloquy-post.is-focused[data-post-key]',
-		);
-		if (card) this.focusCard(card, scroll, 'center');
-	}
-
-	private postKey(post: TimelinePost): string {
-		return post.blockId ?? `${post.file.path}:${post.lineStart}:${post.time}`;
-	}
-
 	private async saveTaskState(
 		post: TimelinePost,
 		task: MarkdownTask,
 		checked: boolean,
-		saved: () => void,
+		saved: (post: TimelinePost) => void,
 	): Promise<void> {
 		try {
-			await this.service.updateTask(post, task, checked, { verifiedByRenderer: true });
-			saved();
+			saved(await this.service.updateTask(post, task, checked, { verifiedByRenderer: true }));
 		} catch (error) {
 			console.error('Soliloquy: failed to update task', error);
 			new Notice('Could not update the task. Reload the timeline and try again.');
@@ -692,9 +356,4 @@ export class TimelinePanel extends Component {
 			new Notice('Task saved, but the timeline could not refresh.');
 		}
 	}
-}
-
-
-function nextAnimationFrame(): Promise<void> {
-	return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
 }

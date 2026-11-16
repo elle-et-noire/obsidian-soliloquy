@@ -29,7 +29,7 @@ npm run build
 npm run validate:version
 ```
 
-CI runs tests, lint, and build on Node.js 20, 22, and 24. The production build writes `main.js` in the plugin root. Reload Obsidian to test the installed plugin; describe any host or mobile behavior that was not verified.
+CI (`.github/workflows/ci.yml`) validates version metadata and runs tests, lint, and build on Node.js 20, 22, and 24 for pushes to `main` and for pull requests. The production build writes `main.js` in the plugin root. Reload Obsidian to test the installed plugin; describe any host or mobile behavior that was not verified.
 
 ## Implementation rules
 

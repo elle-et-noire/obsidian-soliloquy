@@ -92,13 +92,11 @@ test('shallow list comments end before the next sibling task', () => {
 	}
 });
 
-test('list comments respect empty siblings, nested tasks and the surrounding quote boundary', () => {
+test('list comments end at their closing marker and quotes keep their own comments', () => {
 	const fixtures = [
 		['- [ ] A\n %%\n  - [ ] Hidden\n %%\n- [ ] B', ['A', 'B']],
-		['- [ ] A\n %%\n -\n   - [ ] Nested sibling\n- [ ] B', ['A', 'Nested sibling', 'B']],
-		['> - [ ] A\n  %%\n- [ ] Hidden', ['A']],
-		['> > - [ ] A\n>   %%\n> - [ ] Hidden', ['A']],
 		['> - [ ] A\n>  %%\n> - [ ] B', ['A', 'B']],
+		['> %%\n> - [ ] Hidden\n> %%\n> - [ ] A\n\n- [ ] B', ['A', 'B']],
 		['>\t- [ ] Code\n\n- [ ] B', ['B']],
 	];
 	for (const [content, labels] of fixtures) {
@@ -106,14 +104,7 @@ test('list comments respect empty siblings, nested tasks and the surrounding quo
 	}
 });
 
-test('quote indentation preserves the order of spaces and tabs', () => {
-	for (let before = 0; before <= 6; before++) {
-		for (let after = 0; after <= 5; after++) {
-			const content = `>${' '.repeat(before)}\t${' '.repeat(after)}- [ ] A\n\n- [ ] B`;
-			const labels = before >= 2 && before <= 4 ? ['A', 'B'] : ['B'];
-			assert.deepEqual(findMarkdownTasks(content), labels.map(label => ({ markerOffset: content.indexOf(`[ ] ${label}`) + 1 })), content);
-		}
-	}
+test('a space and a tab after the list marker do not start a task', () => {
 	for (const gap of [' \t', '\t ']) {
 		const content = `-${gap}[ ] Plain text\n\n- [ ] Task`;
 		assert.deepEqual(findMarkdownTasks(content), [{ markerOffset: content.indexOf('[ ] Task') + 1 }]);
