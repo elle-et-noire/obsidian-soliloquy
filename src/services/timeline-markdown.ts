@@ -1,3 +1,5 @@
+import type { TFile } from 'obsidian';
+import type { TimelinePost } from '../types';
 import { TimelineUserError } from './errors';
 import { MarkdownFenceTracker } from './markdown-fence';
 
@@ -24,6 +26,17 @@ const TIMELINE_HEADING_LEVEL = 2;
 // Only unindented headings: indented ones belong to post bodies (list items).
 const ATX_HEADING_PATTERN = /^(#{1,6})(?:[ \t]+(.*?))?[ \t]*$/;
 const CLOSING_SEQUENCE_PATTERN = /(?:^|[ \t]+)#+$/;
+const POST_PATTERN = /^- (\d{2}:\d{2})(?:\s+\^([\w-]+))?(?:\s+(.+))?\s*$/;
+const REPLY_LINK_PATTERN = /^\[\[[^\]]*#\^([\w-]+)(?:\|[^\]]+)?\]\]$/;
+
+/** A post being parsed; its end line grows with each body line. */
+interface ParsedPost {
+	post: Omit<TimelinePost, 'content' | 'lineEnd'>;
+	lineEnd: number;
+	inline?: string;
+	/** Raw continuation lines, with '' for blank lines between them. */
+	body: string[];
+}
 
 /**
  * Compares heading text the way a reader would: surrounding and repeated
@@ -114,6 +127,155 @@ export function replaceSourceLines(
 	const trailingBreak = replaced.match(/\r?\n$/)?.[0] ?? '';
 	return `${source.slice(0, first.start)}${replacement.join(lineEnding)}${trailingBreak}`
 		+ source.slice(endOffset);
+}
+
+/** Parses the posts in every timeline section of a daily note. */
+export function parseTimelinePosts(
+	source: string,
+	headingText: string,
+	date: string,
+	file: TFile,
+): TimelinePost[] {
+	return findTimelineSections(source, headingText).flatMap((section) =>
+		parsePosts(section.lines, section.lineOffset, date, file));
+}
+
+/** Parses the posts in one timeline section's lines, starting at source line lineOffset. */
+export function parsePosts(
+	lines: string[],
+	lineOffset: number,
+	date: string,
+	file: TFile,
+): TimelinePost[] {
+	const posts: TimelinePost[] = [];
+	let current: ParsedPost | null = null;
+	let blankLines = 0;
+	const fence = new MarkdownFenceTracker();
+
+	for (const [index, line] of lines.entries()) {
+		// Stored body lines belong to the post, including its indented code fences.
+		if (current && (line.startsWith('\t') || line.startsWith('  '))) {
+			for (let blank = 0; blank < blankLines; blank++) current.body.push('');
+			current.body.push(line);
+			current.lineEnd = lineOffset + index + 1;
+			blankLines = 0;
+			continue;
+		}
+		if (!line.trim()) {
+			if (current) blankLines++;
+			continue;
+		}
+		// Never extend a replacement range across unrelated paragraphs or lists.
+		if (current) posts.push(withReplyMetadata(finishPost(current)));
+		current = null;
+		blankLines = 0;
+		if (fence.consume(line)) continue;
+		const match = POST_PATTERN.exec(line);
+		if (match?.[1]) {
+			current = {
+				post: {
+					date,
+					time: match[1],
+					file,
+					lineStart: lineOffset + index,
+					blockId: match[2],
+				},
+				lineEnd: lineOffset + index + 1,
+				inline: match[3],
+				body: [],
+			};
+			continue;
+		}
+	}
+
+	if (current) posts.push(withReplyMetadata(finishPost(current)));
+	return posts;
+}
+
+/** Formats a post as its source lines, joined with '\n'. */
+export function formatPost(
+	time: string,
+	content: string,
+	blockId: string,
+	replyLink?: string,
+	indent = '\t',
+): string {
+	// Tab-indented posts keep their historic tab-only blank lines.
+	const indentLine = (line: string) => (line || indent === '\t' ? `${indent}${line}` : '');
+	return [
+		`- ${time} ^${blockId}`,
+		...(replyLink ? [indentLine(replyLink)] : []),
+		...content.split('\n').map(indentLine),
+	].join('\n');
+}
+
+/**
+ * Replaces a post's source lines with formatted post text (lines joined with
+ * '\n') and returns the new source and the post's new end line.
+ */
+export function replacePost(
+	source: string,
+	post: Pick<TimelinePost, 'lineStart' | 'lineEnd'>,
+	formatted: string,
+): { source: string; lineEnd: number } {
+	const replacement = formatted.split('\n');
+	return {
+		source: replaceSourceLines(source, post.lineStart, post.lineEnd, replacement),
+		lineEnd: post.lineStart + replacement.length,
+	};
+}
+
+/**
+ * Adds a block ID to a post's first line and leaves its body untouched.
+ * Returns null when that line is no longer a post line.
+ */
+export function addPostBlockId(
+	source: string,
+	post: Pick<TimelinePost, 'lineStart'>,
+	blockId: string,
+): string | null {
+	const firstLine = splitSourceLines(source)[post.lineStart]?.text ?? '';
+	const identified = firstLine.replace(/^- (\d{2}:\d{2})/, `- $1 ^${blockId}`);
+	if (identified === firstLine) return null;
+	return replaceSourceLines(source, post.lineStart, post.lineStart + 1, [identified]);
+}
+
+/** Removes one indentation unit and remembers it so edits can write it back. */
+function finishPost({ post, lineEnd, inline, body }: ParsedPost): TimelinePost {
+	const indented = body.filter((line) => line.trim());
+	const spaceWidths = indented
+		.filter((line) => line.startsWith(' '))
+		.map((line) => line.length - line.trimStart().length);
+	const spaceUnit = spaceWidths.length > 0 ? Math.min(...spaceWidths) : 2;
+	const bodyIndent = indented[0]?.startsWith(' ') ? ' '.repeat(spaceUnit) : '\t';
+	const bodyLines = body.map((line) => {
+		if (line.startsWith('\t')) return line.slice(1);
+		const width = line.length - line.trimStart().length;
+		return line.slice(Math.min(width, spaceUnit));
+	});
+	// Without inline text, blank lines before the first body line are not content.
+	const firstBody = bodyLines.findIndex((line) => line !== '');
+	const parts = inline === undefined
+		? (firstBody < 0 ? [] : bodyLines.slice(firstBody))
+		: [inline, ...bodyLines];
+	return {
+		...post,
+		content: parts.join('\n'),
+		lineEnd,
+		...(body.length > 0 ? { bodyIndent } : {}),
+	};
+}
+
+function withReplyMetadata(post: TimelinePost): TimelinePost {
+	const lines = post.content.split('\n');
+	const match = lines[0] ? REPLY_LINK_PATTERN.exec(lines[0]) : null;
+	if (!match?.[1]) return post;
+	return {
+		...post,
+		content: lines.slice(1).join('\n'),
+		replyToBlockId: match[1],
+		replyLink: lines[0],
+	};
 }
 
 function splitSourceLines(source: string): SourceLine[] {

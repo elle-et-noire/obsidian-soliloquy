@@ -28,12 +28,21 @@ Soliloquy creates today's note when needed and writes below a configurable level
 
 The block ID lets Soliloquy locate a post safely after other lines are inserted. Replies are regular posts containing an Obsidian block link to their parent. You can read and edit the files normally; keep the timestamp line, indentation, and block ID intact if you edit a post by hand. Body lines may be indented with a tab or with spaces; edits keep the indentation the post already uses.
 
-The timeline section is the level-two heading whose text matches the **Timeline heading** setting, ignoring letter case, extra spaces, and closing `#` characters. It ends at the next level-one or level-two heading; deeper headings stay inside it. Headings in code blocks and comments (`%% %%`, `<!-- -->`) are ignored. A note with more than one matching section is not changed. Soliloquy creates today's note as an empty file, so templates from the Daily notes or Templater plugins are not applied to it.
+The timeline section is the level-two heading whose text matches the **Timeline heading** setting, ignoring letter case, extra spaces, and closing `#` characters. It ends at the next level-one or level-two heading; deeper headings stay inside it. Headings in code blocks and comments (`%% %%`, `<!-- -->`) are ignored. A note with more than one matching section is not changed.
+
+### Creating today's note
+
+When you post and today's note does not exist yet, Soliloquy creates it and adds the timeline heading with the post. By default the new note is otherwise empty. With **Use core daily notes settings** on, Soliloquy uses the folder, date format, and template of the core Daily notes plugin instead:
+
+- The template is copied into the new note with `{{date}}` (in the daily note format), `{{time}}` (`HH:mm`), `{{title}}` (the note name), and `{{date:FORMAT}}` or `{{time:FORMAT}}` (any Moment format) filled in. Other text, including Templater commands, is copied unchanged. If the template contains the timeline heading, posts go below it; otherwise the heading is added at the end.
+- If the template file cannot be found or read, Soliloquy shows a notice, creates an empty note, and still saves the post.
+- An existing note is never changed by the template, so a note created by Daily notes or another plugin keeps its content.
+- Soliloquy does not run Templater. If Templater's **Trigger Templater on new file creation** is on, Templater may process the note after Soliloquy creates it, including the first post's text. Soliloquy adds the post right after creating the note and always edits the current file contents, but a Templater run that reads the note before a post is added and writes it afterwards (for example, while it waits for a prompt) can overwrite that post. Avoid posting until Templater has finished, or keep Templater commands out of the Daily notes template.
 
 ## Usage
 
 1. Select the **Open soliloquy** ribbon icon, or run **Soliloquy: Open timeline** from the command palette.
-2. Enter a post and select the send button. You can also press `Ctrl+Enter` (`Control+Enter` on macOS) while the editor is focused.
+2. Enter a post and select the send button. You can also press `Ctrl+Enter` (`Cmd+Enter` on macOS) while the editor is focused.
 3. Select the search button to filter the timeline. Multiple words are matched together.
 4. Select a post card, or focus it and press `Enter`, to open its thread.
 5. Select the reply button with the reply count to write a reply, or the pencil button to edit a post.
@@ -55,7 +64,7 @@ Assign your preferred shortcuts under **Settings → Hotkeys** by searching for 
 
 All three commands open Soliloquy if it is closed, and target the modal while it is open. The search and post commands return from a thread to the timeline. Switching between search and posting preserves the input text, selection, Vim mode, and undo history, just like the search button. No default hotkeys are assigned.
 
-Sidebar, tab, and modal displays share the same input shortcuts:
+Sidebar, tab, and modal displays share the same input shortcuts. They apply while focus is in Soliloquy (or nothing is focused); keys typed in other panes keep their usual behavior.
 
 - Inputs follow Obsidian's **Settings → Editor → Vim key bindings** setting. New Vim inputs start in Insert mode without a persistent mode indicator. Setting changes apply when an input receives focus again. Custom mappings from other Vim plugins are not automatically inherited.
 - In Vim Insert mode, `Tab` indents the current or selected lines and `Shift+Tab` removes one level of indentation. In Normal mode, both keys keep their standard forward/backward focus navigation.
@@ -70,7 +79,7 @@ Sidebar, tab, and modal displays share the same input shortcuts:
 
 Run **Soliloquy: Open timeline in modal**, or assign it a hotkey under **Settings → Hotkeys**. The modal starts with the post input focused and includes the full timeline, search, threads, replies, and editing. An existing sidebar or tab stays open with its own input and navigation state; both displays use the same daily notes.
 
-- `Ctrl+Enter` posts, replies, or saves an edit. Posting keeps the modal open.
+- `Ctrl+Enter` (`Cmd+Enter` on macOS) posts, replies, or saves an edit. Posting keeps the modal open.
 - While a save is in progress, repeated clicks and submission shortcuts do not submit the same input again. Failed saves keep the input available for retry.
 - Closing uses Obsidian's standard focus restoration. Following a date, time, or note link closes the modal and opens that destination instead.
 - Running the modal command again focuses the existing modal rather than opening another one.
@@ -82,11 +91,14 @@ The close button and clicking outside the modal also close it. Unsubmitted modal
 
 Open **Settings → Soliloquy** to configure:
 
+- **Use core daily notes settings**: Use the folder, date format, and template of the core Daily notes plugin. Default: off. While it is on and Daily notes is enabled with a supported format, the next two settings are not used; otherwise Soliloquy falls back to them and creates empty notes.
 - **Daily note folder**: Vault-relative folder containing Soliloquy's daily notes. Default: `log`.
 - **Daily note format**: Moment-style path below that folder. Default: `YYYY/MM/YYYY-MM-DD`.
 - **Timeline heading**: The level-two heading under which posts are stored. Default: `soliloquy`.
 
-The folder and format must describe the same files you want Soliloquy to read. Changing them does not move existing notes, and changing the heading hides posts stored under the previous heading until you rename it in those notes.
+The folder and format must describe the same files you want Soliloquy to read. Changing them, or turning the core daily notes option on or off, does not move existing notes: posts in notes outside the new location disappear from the timeline until you move those notes. Changing the heading likewise hides posts stored under the previous heading until you rename it in those notes.
+
+Obsidian does not notify plugins when the Daily notes settings change. Soliloquy rereads them when it loads, when the workspace is ready, when you open its settings, and before it creates today's note; reopen the Soliloquy settings or reload Obsidian to update the timeline right after changing them. Daily notes date formats that cannot identify each date from the file path (for example, a format without the year) are not supported.
 
 ## Installation
 
@@ -122,7 +134,7 @@ npm run lint
 npm run build
 ```
 
-The production build creates `main.js` at the repository root. Generated build output and `node_modules` are not committed. CI runs the tests, lint, and build on Node.js 20, 22, and 24.
+The production build creates `main.js` at the repository root. Generated build output and `node_modules` are not committed. CI validates the version metadata and runs the tests, lint, and build on Node.js 20, 22, and 24 for pushes to `main` and for pull requests.
 
 ## Releasing
 

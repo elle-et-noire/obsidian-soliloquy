@@ -39,7 +39,7 @@ const warm = await measureAsync(() => service.getTimeline());
 const warmReads = reads - coldReads;
 const posts = cold.value.posts;
 // A write rereads only its note, then sorts and indexes every post again.
-await service.updatePost({ ...posts[0] }, `${posts[0].content} (edited)`);
+await service.updatePost(posts[0], `${posts[0].content} (edited)`);
 const writeReads = reads;
 const afterWrite = await measureAsync(() => service.getTimeline());
 const terms = ['synthetic', 'benchmark'];

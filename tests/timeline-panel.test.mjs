@@ -25,6 +25,7 @@ const result = await build({
 					export class Notice {}
 					export const moment = () => {};
 					export const setIcon = () => {};
+					export const Platform = { isMacOS: false };
 				`,
 				loader: 'js',
 			}));
@@ -48,12 +49,12 @@ function harness() {
 	const panel = new TimelinePanel({}, root, service);
 	panel.postRenderer.restoreCard = async () => {};
 	const attributes = new Map();
-	panel.timelineEl = {
+	panel.surface.timelineEl = {
 		...root,
 		setAttribute: (key, value) => attributes.set(key, value),
 	};
 	panel.composer = { updateStats() {} };
-	panel.renderTimeline = () => { renders++; return Promise.resolve(); };
+	panel.list.render = () => { renders++; return Promise.resolve(); };
 	return { panel, service, attributes, reads: () => reads, renders: () => renders };
 }
 

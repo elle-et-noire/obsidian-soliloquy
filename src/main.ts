@@ -6,6 +6,7 @@ import {
 	SoliloquySettingTab,
 	SoliloquySettings,
 } from './settings';
+import { runDetached } from './ui/report-failure';
 import { SOLILOQUY_VIEW_TYPE, SoliloquyView, type SoliloquyFocusTarget } from './ui/soliloquy-view';
 import { SoliloquyModal } from './ui/soliloquy-modal';
 
@@ -18,6 +19,15 @@ export default class SoliloquyPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.service = new TimelineService(this.app, () => this.settings);
+		// Unreadable notes are skipped; each is reported once, not on every refresh.
+		this.register(this.service.onReadFailure((paths) => {
+			new Notice(paths.length === 1
+				? `Could not read ${paths[0]}. Its posts are not shown.`
+				: `Could not read ${paths.length} daily notes. Their posts are not shown.`);
+		}));
+		this.register(this.service.onTemplateFailure((templatePath) => {
+			new Notice(`Could not use the daily note template ${templatePath}. Today's note was created without it.`);
+		}));
 		this.settingsCoordinator = new SettingsCoordinator(
 			500,
 			(snapshot) => this.saveData(snapshot),
@@ -37,13 +47,11 @@ export default class SoliloquyPlugin extends Plugin {
 			(leaf) => new SoliloquyView(leaf, this.service),
 		);
 
-		this.addRibbonIcon('messages-square', 'Open soliloquy', () => {
-			void this.activateView();
-		});
+		this.addRibbonIcon('messages-square', 'Open soliloquy', () => this.openView());
 		this.addCommand({
 			id: 'open-timeline',
 			name: 'Open timeline',
-			callback: () => void this.activateView(),
+			callback: () => this.openView(),
 		});
 		this.addCommand({
 			id: 'open-timeline-modal',
@@ -53,17 +61,17 @@ export default class SoliloquyPlugin extends Plugin {
 		this.addCommand({
 			id: 'focus-view',
 			name: 'Focus view',
-			callback: () => void this.activateView('view'),
+			callback: () => this.openView('view'),
 		});
 		this.addCommand({
 			id: 'focus-search',
 			name: 'Focus search',
-			callback: () => void this.activateView('search'),
+			callback: () => this.openView('search'),
 		});
 		this.addCommand({
 			id: 'focus-post',
 			name: 'Focus post composer',
-			callback: () => void this.activateView('post'),
+			callback: () => this.openView('post'),
 		});
 		this.addSettingTab(new SoliloquySettingTab(this.app, this));
 
@@ -73,6 +81,8 @@ export default class SoliloquyPlugin extends Plugin {
 		}));
 		// Vault emits 'create' for every existing file while loading; listen after that.
 		this.app.workspace.onLayoutReady(() => {
+			// Core plugin settings are final once the layout is ready.
+			this.service.refreshDailyNoteSettings();
 			this.registerEvent(this.app.vault.on('create', (file) => {
 				if (file instanceof TFile) this.service.fileChanged(file);
 			}));
@@ -88,16 +98,18 @@ export default class SoliloquyPlugin extends Plugin {
 		this.register(() => {
 			this.modal?.close();
 			this.service.dispose();
-			void this.flushSettings();
+			runDetached(() => this.flushSettings(), 'save settings');
 		});
 	}
 
 	async loadSettings(): Promise<void> {
-		this.settings = Object.assign(
+		const settings: SoliloquySettings = Object.assign(
 			{},
 			DEFAULT_SETTINGS,
 			(await this.loadData()) as Partial<SoliloquySettings>,
 		);
+		settings.useCoreDailyNotes = settings.useCoreDailyNotes === true;
+		this.settings = settings;
 	}
 
 	scheduleSettingsSave(settings: SoliloquySettings): void {
@@ -115,6 +127,10 @@ export default class SoliloquyPlugin extends Plugin {
 	private reportSettingsError(error: unknown): void {
 		console.error('Soliloquy: failed to save settings', error);
 		new Notice('Could not save soliloquy settings.');
+	}
+
+	private openView(target: SoliloquyFocusTarget = 'view'): void {
+		runDetached(() => this.activateView(target), 'open the timeline', 'Could not open the timeline.');
 	}
 
 	private async activateView(target: SoliloquyFocusTarget = 'view'): Promise<void> {
@@ -147,7 +163,8 @@ export default class SoliloquyPlugin extends Plugin {
 }
 
 function settingsEqual(a: SoliloquySettings, b: SoliloquySettings): boolean {
-	return a.dailyNoteFolder === b.dailyNoteFolder
+	return a.useCoreDailyNotes === b.useCoreDailyNotes
+		&& a.dailyNoteFolder === b.dailyNoteFolder
 		&& a.dailyNoteFormat === b.dailyNoteFormat
 		&& a.sectionHeading === b.sectionHeading;
 }

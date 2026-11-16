@@ -39,6 +39,7 @@ export class KeyboardOwner {
 
 export function createRoot(ownerDocument = { activeElement: null }) {
 	return {
+		nodeType: 1,
 		ownerDocument,
 		listeners: new Map(),
 		contains(element) { return element === this || element?.root === this; },
@@ -53,6 +54,7 @@ export function createRoot(ownerDocument = { activeElement: null }) {
 
 export function createInput(root, kind = 'post') {
 	return {
+		nodeType: 1,
 		root, kind,
 		value: 'Unsaved text', selectionStart: 2, selectionEnd: 7,
 		shown: true,
@@ -80,7 +82,8 @@ export function press(scope, root, overrides = {}) {
 		event.preventDefault();
 		event.stopped = true;
 	}
-	if (!event.stopped) {
+	// Like DOM events, only keys aimed inside the root reach its own listeners.
+	if (!event.stopped && root.contains(event.target)) {
 		for (const listener of root.listeners.get('keydown') ?? []) {
 			listener(event);
 			if (event.stopped) break;

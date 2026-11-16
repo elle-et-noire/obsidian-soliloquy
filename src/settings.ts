@@ -5,18 +5,31 @@ import {
 	dailyNoteFormatPreview,
 	validateDailyNoteFormat,
 } from './services/daily-note-path';
+import {
+	readCoreDailyNotesOptions,
+	resolveDailyNotes,
+} from './services/daily-note-settings';
 
 export interface SoliloquySettings {
+	/** Use the core Daily notes folder, format, and template when available. */
+	useCoreDailyNotes: boolean;
 	dailyNoteFolder: string;
 	dailyNoteFormat: string;
 	sectionHeading: string;
 }
 
+// Off by default: turning it on can move today's note and hide posts stored
+// with Soliloquy's own folder and format.
 export const DEFAULT_SETTINGS: SoliloquySettings = {
+	useCoreDailyNotes: false,
 	dailyNoteFolder: 'log',
 	dailyNoteFormat: 'YYYY/MM/YYYY-MM-DD',
 	sectionHeading: 'soliloquy',
 };
+
+const CORE_TOGGLE_DESC = 'Use the folder, date format, and template of the core Daily notes plugin.';
+const FOLDER_DESC = 'Vault-relative folder containing daily notes.';
+const OVERRIDDEN_DESC = 'Not used while core daily notes settings are in effect.';
 
 interface SoliloquySettingRow {
 	name: string;
@@ -26,6 +39,9 @@ interface SoliloquySettingRow {
 
 export class SoliloquySettingTab extends PluginSettingTab {
 	private draft: SoliloquySettings;
+	private coreToggleRow?: Setting;
+	private folderRow?: Setting;
+	private formatRow?: Setting;
 
 	constructor(app: App, private readonly plugin: SoliloquyPlugin) {
 		super(app, plugin);
@@ -33,12 +49,14 @@ export class SoliloquySettingTab extends PluginSettingTab {
 	}
 
 	getSettingDefinitions(): SettingDefinition[] {
+		this.plugin.service.refreshDailyNoteSettings();
 		this.draft = { ...this.plugin.settings };
 		return this.getSettingRows();
 	}
 
 	display(): void {
 		this.containerEl.empty();
+		this.plugin.service.refreshDailyNoteSettings();
 		this.draft = { ...this.plugin.settings };
 
 		for (const definition of this.getSettingRows()) {
@@ -62,8 +80,13 @@ export class SoliloquySettingTab extends PluginSettingTab {
 	private getSettingRows(): SoliloquySettingRow[] {
 		return [
 			{
+				name: 'Use core daily notes settings',
+				desc: CORE_TOGGLE_DESC,
+				render: (setting) => this.addCoreDailyNotesControl(setting),
+			},
+			{
 				name: 'Daily note folder',
-				desc: 'Vault-relative folder containing daily notes.',
+				desc: FOLDER_DESC,
 				render: (setting) => this.addDailyNoteFolderControl(setting),
 			},
 			{
@@ -79,7 +102,52 @@ export class SoliloquySettingTab extends PluginSettingTab {
 		];
 	}
 
+	private addCoreDailyNotesControl(setting: Setting): void {
+		this.coreToggleRow = setting;
+		setting.addToggle((toggle) =>
+			toggle.setValue(this.draft.useCoreDailyNotes).onChange((value) => {
+				this.draft.useCoreDailyNotes = value;
+				this.scheduleDraft();
+				this.updateDailyNoteRows();
+			}),
+		);
+		this.updateDailyNoteRows();
+	}
+
+	/** Shows which settings are in effect and disables the overridden ones. */
+	private updateDailyNoteRows(): void {
+		const resolved = resolveDailyNotes(
+			this.draft,
+			this.draft.useCoreDailyNotes ? readCoreDailyNotesOptions(this.app) : null,
+		);
+		const usingCore = resolved.source === 'core';
+		let status = '';
+		if (usingCore) {
+			const folder = resolved.dailyNoteFolder || 'the vault root';
+			const template = resolved.template ? `, template ${resolved.template}` : '';
+			status = ` Using ${resolved.dailyNoteFormat} in ${folder}${template}.`;
+		} else if (resolved.fallback === 'unavailable') {
+			status = ' Daily notes is off, so the settings below are used.';
+		} else if (resolved.fallback === 'invalid-format') {
+			status = ' The Daily notes date format is not supported, so the settings below are used.';
+		}
+		this.coreToggleRow?.setDesc(`${CORE_TOGGLE_DESC}${status}`);
+
+		for (const row of [this.folderRow, this.formatRow]) {
+			row?.setDisabled(usingCore);
+			for (const component of row?.components ?? []) component.setDisabled(usingCore);
+		}
+		if (usingCore) {
+			this.folderRow?.setDesc(OVERRIDDEN_DESC);
+			this.formatRow?.setDesc(OVERRIDDEN_DESC);
+		} else {
+			this.folderRow?.setDesc(FOLDER_DESC);
+			if (this.formatRow) this.updateFormatDescription(this.formatRow, this.draft.dailyNoteFormat);
+		}
+	}
+
 	private addDailyNoteFolderControl(setting: Setting): void {
+		this.folderRow = setting;
 		setting.addText((text) =>
 			text.setValue(this.draft.dailyNoteFolder).onChange((value) => {
 				this.draft.dailyNoteFolder = value.trim().replace(/^\/+|\/+$/g, '');
@@ -89,6 +157,7 @@ export class SoliloquySettingTab extends PluginSettingTab {
 	}
 
 	private addDailyNoteFormatControl(setting: Setting): void {
+		this.formatRow = setting;
 		setting.addText((text) =>
 			text.setValue(this.draft.dailyNoteFormat).onChange((value) => {
 				const format = value.trim();
@@ -98,6 +167,7 @@ export class SoliloquySettingTab extends PluginSettingTab {
 			}),
 		);
 		this.updateFormatDescription(setting, this.draft.dailyNoteFormat);
+		this.updateDailyNoteRows();
 	}
 
 	private addTimelineHeadingControl(setting: Setting): void {

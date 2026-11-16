@@ -7,7 +7,7 @@ export function taskCheckboxes(element: HTMLElement): HTMLInputElement[] {
 		.filter((checkbox) => !checkbox.closest('.internal-embed'));
 }
 
-/** The parser is a fast hint; the renderer decides which source marker is real. */
+/** The source candidate is a fast hint; the renderer decides which source marker is real. */
 export async function resolveTaskChange(
 	app: App,
 	owner: Component,

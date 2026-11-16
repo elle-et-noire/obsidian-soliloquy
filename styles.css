@@ -9,6 +9,8 @@
 	unicode-range: U+0060;
 }
 
+/* Hosts */
+
 .modal.soliloquy-modal {
 	width: min(820px, 92vw);
 	height: min(800px, 85vh);
@@ -16,10 +18,18 @@
 	padding-bottom: 0;
 }
 
-.soliloquy-modal .modal-content {
+/* Higher specificity than Obsidian's phone `.modal-content` padding. */
+.modal.soliloquy-modal .modal-content {
 	flex: 1;
 	min-height: 0;
 	margin-bottom: 0;
+	padding: 0;
+}
+
+/* Higher specificity than Obsidian's `.view-content` padding and phone top margin. */
+.workspace-leaf .workspace-leaf-content[data-type="soliloquy-timeline"] .view-content.soliloquy-view {
+	margin-top: 0;
+	padding: 0;
 }
 
 .soliloquy-view {
@@ -28,19 +38,36 @@
 	--soliloquy-surface: var(--background-secondary);
 	--soliloquy-border: var(--background-modifier-border);
 	overflow-y: auto;
-	padding: 0 !important;
 	background: var(--background-primary);
 }
 
-.workspace-leaf-content[data-type="soliloquy-timeline"] .view-content.soliloquy-view {
-	margin-top: 0 !important;
-	padding-top: 0 !important;
+/*
+ * Obsidian adds button shadows from many state selectors (`:focus-visible`,
+ * `.mod-cta`, `.mobile-tap`, hover) whose specificity matches or exceeds this one.
+ */
+.soliloquy-view button {
+	box-shadow: none !important;
 }
 
-.soliloquy-timeline {
-	width: min(100%, var(--soliloquy-width));
-	margin-inline: auto;
+.soliloquy-view button:not(.mod-cta),
+.soliloquy-view button:not(.mod-cta):hover,
+.soliloquy-view button:not(.mod-cta):focus,
+.soliloquy-view button:not(.mod-cta):active {
+	background: transparent;
 }
+
+.soliloquy-view button:focus-visible,
+.soliloquy-view .soliloquy-post:focus-visible {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: 2px;
+}
+
+.soliloquy-view button:disabled {
+	cursor: not-allowed;
+	opacity: 0.55;
+}
+
+/* Composer */
 
 .soliloquy-composer {
 	position: sticky;
@@ -49,7 +76,7 @@
 	z-index: 10;
 	width: 100%;
 	box-sizing: border-box;
-	margin: 0 !important;
+	margin: 0;
 	padding: var(--size-4-3) max(
 		var(--size-4-3),
 		calc((100% - var(--soliloquy-width)) / 2 + var(--size-4-3))
@@ -61,10 +88,65 @@
 	border-radius: 0;
 }
 
-.soliloquy-input,
-.soliloquy-search,
-.soliloquy-edit-input,
-.soliloquy-reply-input {
+.soliloquy-composer-actions {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--size-4-2);
+	margin-top: var(--size-4-3);
+}
+
+.soliloquy-stats {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-3);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+.soliloquy-stat {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.soliloquy-stat svg {
+	width: 14px;
+	height: 14px;
+}
+
+.soliloquy-composer-buttons {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+}
+
+.soliloquy-search-toggle {
+	color: var(--text-muted);
+	background: transparent;
+}
+
+.soliloquy-search-toggle:hover {
+	color: var(--text-accent);
+	background: transparent;
+}
+
+.soliloquy-view .soliloquy-search-toggle.is-active,
+.soliloquy-view .soliloquy-search-toggle.is-active:hover,
+.soliloquy-view .soliloquy-search-toggle.is-active:focus,
+.soliloquy-view .soliloquy-search-toggle.is-active:active {
+	color: var(--text-on-accent);
+	background: var(--interactive-accent);
+}
+
+/* Inputs */
+
+.soliloquy-view .soliloquy-input,
+.soliloquy-view .soliloquy-search,
+.soliloquy-view .soliloquy-edit-input,
+.soliloquy-view .soliloquy-reply-input {
 	display: block;
 	width: 100%;
 	box-sizing: border-box;
@@ -76,8 +158,26 @@
 	border-radius: 8px;
 	box-shadow: none;
 	font: inherit;
+	font-family: "Soliloquy backtick", var(--font-interface);
+	font-size: var(--font-ui-small);
+	font-weight: 400;
 	line-height: 1.55;
+	letter-spacing: normal;
 	cursor: text;
+}
+
+.soliloquy-input,
+.soliloquy-edit-input,
+.soliloquy-reply-input {
+	white-space: pre-wrap;
+	overflow-wrap: normal;
+	word-break: normal;
+	line-break: normal;
+}
+
+.soliloquy-editor:focus-within {
+	border-color: var(--interactive-accent);
+	box-shadow: 0 0 0 1px var(--interactive-accent);
 }
 
 .soliloquy-editor .cm-editor {
@@ -116,6 +216,7 @@
 	font-size: var(--font-ui-smaller);
 }
 
+/* CodeMirror's generated theme selectors are more specific than any plugin selector. */
 .soliloquy-editor .cm-selectionBackground {
 	background: var(--text-selection) !important;
 }
@@ -126,6 +227,7 @@
 
 .soliloquy-editor .cm-editor.cm-focused .cm-fat-cursor {
 	background-color: var(--interactive-accent);
+	/* The Vim fat cursor sets its text color inline. */
 	color: var(--text-on-accent) !important;
 	outline: none;
 }
@@ -134,168 +236,65 @@
 	display: none;
 }
 
-.soliloquy-input,
-.soliloquy-edit-input,
-.soliloquy-reply-input {
-	white-space: pre-wrap;
-	overflow-wrap: normal;
-	word-break: normal;
-	line-break: normal;
-}
+/* Edit and reply actions */
 
-.soliloquy-editor:focus-within {
-	border-color: var(--interactive-accent);
-	box-shadow: 0 0 0 1px var(--interactive-accent);
-}
-
-.soliloquy-composer-actions,
 .soliloquy-edit-actions {
 	display: flex;
 	align-items: center;
+	justify-content: flex-end;
 	gap: var(--size-4-2);
 	margin-top: var(--size-4-3);
 }
 
-.soliloquy-composer-actions {
-	justify-content: space-between;
+.soliloquy-inline-reply-composer {
+	margin-top: var(--size-4-3);
+	padding-top: var(--size-4-3);
+	border-top: 1px solid var(--soliloquy-border);
 }
 
-.soliloquy-stats {
+.soliloquy-inline-reply-actions {
 	display: flex;
 	align-items: center;
-	gap: var(--size-4-3);
-	color: var(--text-muted);
-	font-size: var(--font-ui-smaller);
-	font-variant-numeric: tabular-nums;
-	white-space: nowrap;
-}
-
-.soliloquy-stat {
-	display: inline-flex;
-	align-items: center;
-	gap: 4px;
-}
-
-.soliloquy-stat svg {
-	width: 14px;
-	height: 14px;
-}
-
-.soliloquy-composer-buttons {
-	display: flex;
-	align-items: center;
-	gap: var(--size-4-2);
-}
-
-.soliloquy-edit-actions {
 	justify-content: flex-end;
+	margin-top: var(--size-4-2);
 }
 
-.soliloquy-edit-actions button {
+.soliloquy-composer-actions button,
+.soliloquy-edit-actions button,
+.soliloquy-inline-reply-actions button {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 	width: 26px;
 	height: 26px;
 	padding: 0;
-}
-
-.soliloquy-edit-actions button svg {
-	width: 14px;
-	height: 14px;
-}
-
-.soliloquy-composer button,
-.soliloquy-edit-actions button {
-	box-shadow: none;
 	border-radius: 7px;
+	box-shadow: none;
 }
 
-.soliloquy-composer-actions button {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	width: 26px;
-	height: 26px;
-	padding: 0;
-}
-
-.soliloquy-composer-actions button svg {
+.soliloquy-composer-actions button svg,
+.soliloquy-edit-actions button svg,
+.soliloquy-inline-reply-actions button svg {
 	width: 14px;
 	height: 14px;
 }
 
-.soliloquy-search-toggle {
-	color: var(--text-muted);
-	background: transparent;
-}
-
-.soliloquy-search-toggle:hover {
-	color: var(--text-accent);
-	background: transparent;
-}
-
-.soliloquy-search-toggle.is-active {
-	color: var(--text-on-accent);
-	background: var(--interactive-accent);
-}
-
-.soliloquy-search-toggle.is-active:hover {
-	color: var(--text-on-accent);
-	background: var(--interactive-accent);
-}
-
-.soliloquy-view button,
-.soliloquy-view button:hover,
-.soliloquy-view button:focus,
-.soliloquy-view button:active {
-	box-shadow: none !important;
-}
-
-.soliloquy-view button:not(.mod-cta),
-.soliloquy-view button:not(.mod-cta):hover,
-.soliloquy-view button:not(.mod-cta):focus,
-.soliloquy-view button:not(.mod-cta):active {
-	background: transparent;
-}
-
-.soliloquy-post-meta {
-	color: var(--text-muted);
-	font-size: var(--font-ui-small);
-}
-
-.soliloquy-search {
-	font: inherit;
-	font-size: inherit;
-	line-height: 1.55;
-}
-
-.soliloquy-view .soliloquy-input,
-.soliloquy-view .soliloquy-search,
-.soliloquy-view .soliloquy-edit-input,
-.soliloquy-view .soliloquy-reply-input {
-	font-family: "Soliloquy backtick", var(--font-interface);
-	font-size: var(--font-ui-small);
-	font-weight: 400;
-	line-height: 1.55;
-	letter-spacing: normal;
-}
-
-.soliloquy-view .soliloquy-search-toggle.is-active,
-.soliloquy-view .soliloquy-search-toggle.is-active:hover,
-.soliloquy-view .soliloquy-search-toggle.is-active:focus,
-.soliloquy-view .soliloquy-search-toggle.is-active:active {
-	color: var(--text-on-accent);
-	background: var(--interactive-accent);
-}
+/* Timeline */
 
 .soliloquy-timeline {
 	display: grid;
 	gap: 0;
+	box-sizing: border-box;
+	width: min(100%, var(--soliloquy-width));
+	margin-inline: auto;
 	margin-top: var(--size-4-4);
 	margin-bottom: var(--size-4-8);
 	padding-inline: var(--size-4-3);
-	box-sizing: border-box;
+}
+
+/* Holds the list height while a background refresh re-renders it. */
+.soliloquy-timeline.is-height-locked {
+	min-height: var(--soliloquy-locked-height);
 }
 
 .soliloquy-post {
@@ -306,17 +305,6 @@
 	border: 0;
 	border-bottom: 1px solid var(--soliloquy-border);
 	border-radius: 0;
-}
-
-.soliloquy-load-more {
-	display: flex;
-	justify-content: center;
-	padding: var(--size-4-4) var(--size-4-3);
-}
-
-.soliloquy-load-more > button {
-	color: var(--text-accent);
-	font-size: var(--font-ui-small);
 }
 
 .soliloquy-post:not(.soliloquy-thread-root) {
@@ -332,92 +320,25 @@
 	outline: none;
 }
 
-.soliloquy-post-meta {
+/* A card whose Markdown could not be rendered. */
+.soliloquy-post.is-render-error {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
+	justify-content: space-between;
 	gap: var(--size-4-2);
-	min-height: 20px;
-	margin-top: var(--size-4-2);
-	font-size: 80%;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	cursor: default;
 }
 
-.soliloquy-date-button,
-.soliloquy-time-button,
-.soliloquy-edit-button,
-.soliloquy-reply-button {
-	cursor: pointer;
-	padding: 1px var(--size-4-1);
-	background: transparent;
-	box-shadow: none;
-	font: inherit;
+.soliloquy-post-error-message {
+	color: var(--text-error);
 }
 
-.soliloquy-view .soliloquy-date-button,
-.soliloquy-view .soliloquy-time-button {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	height: 20px;
-	padding: 0;
-	color: var(--text-muted) !important;
-	font-weight: 400;
-	font-variant-numeric: tabular-nums;
-}
-
-.soliloquy-date-button:hover,
-.soliloquy-date-button:focus,
-.soliloquy-time-button:hover,
-.soliloquy-time-button:focus,
-.soliloquy-edit-button:hover,
-.soliloquy-edit-button:focus,
-.soliloquy-reply-button:focus,
-.soliloquy-reply-button:hover {
+.soliloquy-view .soliloquy-post-error-open {
 	color: var(--text-accent);
-	background: transparent;
-}
-
-.soliloquy-view .soliloquy-date-button:hover,
-.soliloquy-view .soliloquy-date-button:focus,
-.soliloquy-view .soliloquy-date-button:active,
-.soliloquy-view .soliloquy-time-button:hover,
-.soliloquy-view .soliloquy-time-button:focus,
-.soliloquy-view .soliloquy-time-button:active {
-	background: transparent;
-	color: var(--text-accent) !important;
-}
-
-.soliloquy-view .soliloquy-date-button:hover,
-.soliloquy-view .soliloquy-time-button:hover {
-	text-decoration: underline;
-}
-
-.soliloquy-edit-button {
-	width: 20px;
-	height: 20px;
-	padding: 0;
-	margin-left: 0;
-	color: var(--text-muted);
-}
-
-.soliloquy-reply-button {
-	gap: 3px;
-	width: auto;
-	height: 20px;
-	padding-inline: 4px;
-	color: var(--text-muted);
-}
-
-.soliloquy-edit-button,
-.soliloquy-reply-button {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-}
-
-.soliloquy-edit-button svg,
-.soliloquy-reply-button svg {
-	width: 13px;
-	height: 13px;
+	font-size: var(--font-ui-small);
 }
 
 .soliloquy-post-content {
@@ -437,36 +358,92 @@
 	margin-bottom: 0;
 }
 
+/* Post meta row */
+
+.soliloquy-post-meta {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	min-height: 20px;
+	margin-top: var(--size-4-2);
+	color: var(--text-muted);
+	font-size: 80%;
+}
+
+.soliloquy-view .soliloquy-date-button,
+.soliloquy-view .soliloquy-time-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	height: 20px;
+	padding: 0;
+	color: var(--text-muted);
+	background: transparent;
+	box-shadow: none;
+	font: inherit;
+	font-weight: 400;
+	font-variant-numeric: tabular-nums;
+	cursor: pointer;
+}
+
+.soliloquy-view .soliloquy-edit-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	margin-left: 0;
+	padding: 0;
+	background: transparent;
+	box-shadow: none;
+	font: inherit;
+	cursor: pointer;
+}
+
+.soliloquy-view .soliloquy-reply-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 3px;
+	width: auto;
+	height: 20px;
+	padding: 1px 4px;
+	background: transparent;
+	box-shadow: none;
+	font: inherit;
+	cursor: pointer;
+}
+
+.soliloquy-view .soliloquy-date-button:hover,
+.soliloquy-view .soliloquy-time-button:hover {
+	color: var(--text-accent);
+	text-decoration: underline;
+}
+
+.soliloquy-view .soliloquy-date-button:focus,
+.soliloquy-view .soliloquy-date-button:active,
+.soliloquy-view .soliloquy-time-button:focus,
+.soliloquy-view .soliloquy-time-button:active,
+.soliloquy-view .soliloquy-edit-button:hover,
+.soliloquy-view .soliloquy-edit-button:focus,
+.soliloquy-view .soliloquy-reply-button:hover,
+.soliloquy-view .soliloquy-reply-button:focus {
+	color: var(--text-accent);
+}
+
+.soliloquy-edit-button svg,
+.soliloquy-reply-button svg {
+	width: 13px;
+	height: 13px;
+}
+
 .soliloquy-reply-count {
 	color: var(--text-faint);
 	font-size: inherit;
 	font-variant-numeric: tabular-nums;
 }
 
-.soliloquy-thread {
-	display: grid;
-	gap: 0;
-	padding-top: var(--size-4-2);
-}
-
-.soliloquy-thread-node,
-.soliloquy-thread-choices {
-	display: grid;
-	gap: 0;
-}
-
-.soliloquy-thread-node {
-	position: relative;
-}
-
-.soliloquy-thread-node.has-next::after {
-	display: none;
-}
-
-.soliloquy-thread-node.is-selected > .soliloquy-post {
-	background: color-mix(in srgb, var(--interactive-accent) 7%, transparent);
-	box-shadow: none;
-}
+/* Thread */
 
 .soliloquy-thread-navigation {
 	display: flex;
@@ -490,41 +467,43 @@
 	height: 16px;
 }
 
-.soliloquy-reply-input {
-	font-family: var(--font-interface);
-	font-size: var(--font-ui-small);
-	font-weight: 400;
-	line-height: 1.55;
-	letter-spacing: normal;
+.soliloquy-thread {
+	display: grid;
+	gap: 0;
+	padding-top: var(--size-4-2);
 }
 
-.soliloquy-inline-reply-composer {
-	margin-top: var(--size-4-3);
-	padding-top: var(--size-4-3);
-	border-top: 1px solid var(--soliloquy-border);
+.soliloquy-thread-node {
+	position: relative;
+	display: grid;
+	gap: 0;
 }
 
-.soliloquy-inline-reply-actions {
-	display: flex;
-	align-items: center;
-	justify-content: flex-end;
-	margin-top: var(--size-4-2);
+.soliloquy-thread-choices {
+	display: grid;
+	gap: 0;
 }
 
-.soliloquy-inline-reply-actions button {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	width: 26px;
-	height: 26px;
-	padding: 0;
-	border-radius: 7px;
+.soliloquy-thread-node.has-next::after {
+	display: none;
+}
+
+.soliloquy-thread-node.is-selected > .soliloquy-post {
+	background: color-mix(in srgb, var(--interactive-accent) 7%, transparent);
 	box-shadow: none;
 }
 
-.soliloquy-inline-reply-actions button svg {
-	width: 14px;
-	height: 14px;
+/* Paging and empty state */
+
+.soliloquy-load-more {
+	display: flex;
+	justify-content: center;
+	padding: var(--size-4-4) var(--size-4-3);
+}
+
+.soliloquy-load-more > button {
+	color: var(--text-accent);
+	font-size: var(--font-ui-small);
 }
 
 .soliloquy-empty {
@@ -536,33 +515,12 @@
 	text-align: center;
 }
 
-.soliloquy-view button:focus-visible,
-.soliloquy-post:focus-visible {
-	outline: 2px solid var(--interactive-accent) !important;
-	outline-offset: 2px;
-}
-
-.soliloquy-view button:disabled {
-	cursor: not-allowed;
-	opacity: 0.55;
-}
-
 @media (max-width: 500px) {
-	.soliloquy-view {
-		padding: 0;
-	}
-
 	.soliloquy-composer {
-		top: 0;
 		padding: var(--size-4-3);
 	}
 
 	.soliloquy-post {
 		padding: var(--size-4-2) var(--size-4-3);
 	}
-}
-
-/* Holds the list height while a background refresh re-renders it. */
-.soliloquy-timeline.is-height-locked {
-	min-height: var(--soliloquy-locked-height);
 }

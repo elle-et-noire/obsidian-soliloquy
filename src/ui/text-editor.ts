@@ -3,6 +3,7 @@ import { Compartment, EditorState, type Extension } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap, indentLess, indentMore } from '@codemirror/commands';
 import { drawSelection, EditorView, keymap, placeholder } from '@codemirror/view';
 import { getCM, Vim, vim } from '@replit/codemirror-vim';
+import { submitKeyShortcut } from './timeline-keyboard';
 
 interface TextEditorOptions {
 	cls: string;
@@ -88,7 +89,8 @@ export class SoliloquyTextEditor extends Component {
 	}
 
 	private readVimSetting(): boolean {
-		// Obsidian exposes this at runtime, but not in its public Vault typings.
+		// Private API: Obsidian exposes this at runtime, but not in its public
+		// Vault typings. If it is missing, inputs fall back to standard editing.
 		const vault = this.app.vault as App['vault'] & { getConfig?: (key: string) => unknown };
 		return vault.getConfig?.('vimMode') === true;
 	}
@@ -113,6 +115,6 @@ export class SoliloquyTextEditor extends Component {
 function editorPresentation(label: string, hint: string): Extension {
 	return [placeholder(hint), EditorView.contentAttributes.of({
 		'aria-label': label,
-		'aria-keyshortcuts': 'Control+Enter Shift+Escape',
+		'aria-keyshortcuts': `${submitKeyShortcut()} Shift+Escape`,
 	})];
 }

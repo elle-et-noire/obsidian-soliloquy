@@ -1,13 +1,13 @@
 import type { TimelinePost } from '../types';
 
-const EMPTY_POSTS: TimelinePost[] = [];
+const EMPTY_POSTS: readonly TimelinePost[] = [];
 
 export class TimelineIndex {
 	private readonly postByBlockId = new Map<string, TimelinePost>();
 	private readonly repliesByParentId = new Map<string, TimelinePost[]>();
 	private readonly searchTextByPost = new WeakMap<TimelinePost, string>();
 
-	constructor(posts: TimelinePost[]) {
+	constructor(posts: readonly TimelinePost[]) {
 		for (const post of posts) {
 			if (post.blockId && !this.postByBlockId.has(post.blockId)) {
 				this.postByBlockId.set(post.blockId, post);
@@ -37,7 +37,7 @@ export class TimelineIndex {
 		return this.postByBlockId.get(blockId);
 	}
 
-	getReplies(post: TimelinePost): TimelinePost[] {
+	getReplies(post: TimelinePost): readonly TimelinePost[] {
 		return post.blockId ? this.repliesByParentId.get(post.blockId) ?? EMPTY_POSTS : EMPTY_POSTS;
 	}
 

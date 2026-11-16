@@ -1,6 +1,7 @@
 import { type App, Component, moment, setIcon } from 'obsidian';
 import type { TimelinePost } from '../types';
 import { SoliloquyTextEditor } from './text-editor';
+import { submitShortcutHint } from './timeline-keyboard';
 
 interface ComposerCallbacks {
 	onPost: () => void;
@@ -17,7 +18,8 @@ export class SoliloquyComposer {
 	private readonly postButton: HTMLButtonElement;
 	private searchMode = false;
 	private posting = false;
-	private searchChangeTimer?: number;
+	/** The pending search debounce and the window that scheduled it. */
+	private searchChangeTimer?: { win: Window; id: number };
 
 	constructor(
 		app: App,
@@ -31,7 +33,7 @@ export class SoliloquyComposer {
 		});
 		this.input = owner.addChild(new SoliloquyTextEditor(app, this.element, {
 			cls: 'soliloquy-input',
-			placeholder: 'Ctrl + Enter to post',
+			placeholder: submitShortcutHint('post'),
 			label: 'Write a post',
 		}));
 
@@ -107,7 +109,7 @@ export class SoliloquyComposer {
 		this.postButton.disabled = this.posting || !this.input.value.trim();
 		if (changed) this.input.setPresentation(
 			enabled ? 'Search posts' : 'Write a post',
-			enabled ? 'Search posts' : 'Ctrl + Enter to post',
+			enabled ? 'Search posts' : submitShortcutHint('post'),
 		);
 
 		this.input.focus();
@@ -116,10 +118,13 @@ export class SoliloquyComposer {
 
 	private scheduleSearchChange(): void {
 		this.cancelScheduledSearch();
-		this.searchChangeTimer = window.setTimeout(() => {
+		// Schedule on the composer's window, which may be a popout.
+		const win = this.element.win;
+		const id = win.setTimeout(() => {
 			this.searchChangeTimer = undefined;
 			this.callbacks.onSearchChange();
 		}, SEARCH_DEBOUNCE_MS);
+		this.searchChangeTimer = { win, id };
 	}
 
 	private notifySearchChange(): void {
@@ -129,11 +134,11 @@ export class SoliloquyComposer {
 
 	private cancelScheduledSearch(): void {
 		if (this.searchChangeTimer === undefined) return;
-		window.clearTimeout(this.searchChangeTimer);
+		this.searchChangeTimer.win.clearTimeout(this.searchChangeTimer.id);
 		this.searchChangeTimer = undefined;
 	}
 
-	updateStats(posts: TimelinePost[], hitCount?: number): void {
+	updateStats(posts: readonly TimelinePost[], hitCount?: number): void {
 		this.statsEl.empty();
 		if (this.searchMode) {
 			const matches = hitCount ?? posts.length;

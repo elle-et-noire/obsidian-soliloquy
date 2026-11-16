@@ -1,13 +1,15 @@
 import { type App, type Component, Notice, setIcon } from 'obsidian';
 import { PostChangedError, TimelineUserError } from '../services/errors';
 import type { TimelineService } from '../services/timeline-service';
-import { applyPostUpdate } from '../services/post-snapshot';
 import type { TimelinePost } from '../types';
 import { captureFocusWithin, shouldRestoreFocusWithin } from './focus-preservation';
 import type { PostCardRenderer } from './post-card';
+import { reportFailure, runDetached } from './report-failure';
 import { SoliloquyTextEditor } from './text-editor';
+import { submitShortcutHint } from './timeline-keyboard';
 
 interface DraftInput {
+	/** The post the draft saves against; replaced by each successful save. */
 	post: TimelinePost;
 	input: SoliloquyTextEditor;
 	button: HTMLButtonElement;
@@ -24,7 +26,7 @@ interface KeptDraft {
 }
 
 type InlineDraft = DraftInput & (
-	| { kind: 'edit'; card: HTMLElement; sourcePost: TimelinePost }
+	| { kind: 'edit'; card: HTMLElement }
 	| {
 		kind: 'reply';
 		element: HTMLElement;
@@ -45,6 +47,8 @@ export class InlinePostEditor {
 	private active?: InlineDraft;
 	private disposed = false;
 	private readonly keptDrafts = new Map<string, KeptDraft>();
+	/** Document whose focus changes can close the draft; follows popout moves. */
+	private focusDocument?: Document;
 
 	constructor(
 		private readonly app: App,
@@ -58,18 +62,35 @@ export class InlinePostEditor {
 	}
 
 	registerFocusEvents(): void {
-		this.owner.registerDomEvent(this.root.ownerDocument, 'focusin', (event) => {
-			const target = event.target as HTMLElement | null;
-			if (!target?.closest) return;
-			const field = target.closest('textarea, input, [contenteditable="true"], [contenteditable=""]');
-			if (!field) return;
-			if (field.tagName === 'INPUT'
-				&& !['text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes((field as HTMLInputElement).type)) return;
-			// Vim prompts within this editor do not close its draft. Other fields
-			// close it, keeping any changes for when it is opened again.
-			if (this.active && !this.active.input.containsTarget(target)) void this.cancel(false, true);
+		this.bindFocusEvents();
+		// Moving the display to a popout window moves its elements to another document.
+		this.owner.register(this.root.onWindowMigrated(() => this.bindFocusEvents()));
+		this.owner.register(() => {
+			this.focusDocument?.removeEventListener('focusin', this.onDocumentFocusIn);
+			this.focusDocument = undefined;
 		});
 	}
+
+	/** Listens for focus changes in the document that currently shows the display. */
+	private bindFocusEvents(): void {
+		const doc = this.root.doc;
+		if (doc === this.focusDocument) return;
+		this.focusDocument?.removeEventListener('focusin', this.onDocumentFocusIn);
+		doc.addEventListener('focusin', this.onDocumentFocusIn);
+		this.focusDocument = doc;
+	}
+
+	private readonly onDocumentFocusIn = (event: FocusEvent): void => {
+		const target = event.target as HTMLElement | null;
+		if (!target?.closest) return;
+		const field = target.closest('textarea, input, [contenteditable="true"], [contenteditable=""]');
+		if (!field) return;
+		if (field.tagName === 'INPUT'
+			&& !['text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes((field as HTMLInputElement).type)) return;
+		// Vim prompts within this editor do not close its draft. Other fields
+		// close it, keeping any changes for when it is opened again.
+		if (this.active && !this.active.input.containsTarget(target)) this.cancelDetached(false, true);
+	};
 
 	isOpen(): boolean {
 		return this.active !== undefined;
@@ -77,7 +98,7 @@ export class InlinePostEditor {
 
 	submitFromShortcut(target: EventTarget | null): boolean {
 		if (this.disposed || !this.active?.input.containsTarget(target)) return false;
-		void this.save();
+		this.saveDetached();
 		return true;
 	}
 
@@ -94,8 +115,8 @@ export class InlinePostEditor {
 		card.removeAttribute('aria-keyshortcuts');
 		const key = `edit:${card.dataset.postKey ?? `${post.file.path}:${post.lineStart}:${post.time}`}`;
 		const draft: InlineDraft = {
-			...this.createInput(card, { ...post }, 'edit', key),
-			kind: 'edit', card, sourcePost: post,
+			...this.createInput(card, post, 'edit', key),
+			kind: 'edit', card,
 		};
 		this.activate(draft);
 	}
@@ -108,7 +129,7 @@ export class InlinePostEditor {
 		stayOnTimeline: boolean,
 	): void {
 		if (this.active?.kind === 'reply' && this.active.postKey === postKey) {
-			void this.cancel(true, true);
+			this.cancelDetached(true, true);
 			return;
 		}
 		this.replaceDraft();
@@ -146,7 +167,7 @@ export class InlinePostEditor {
 	private replaceDraft(): void {
 		// Restoring an edit inserts its card synchronously. Its later refresh
 		// preserves the new draft that is about to receive focus.
-		if (this.active?.kind === 'edit') void this.cancel(false, true);
+		if (this.active?.kind === 'edit') this.cancelDetached(false, true);
 		else this.clear();
 	}
 
@@ -177,7 +198,7 @@ export class InlinePostEditor {
 		}
 		const input = this.owner.addChild(new SoliloquyTextEditor(this.app, parent, {
 			cls: `soliloquy-${kind}-input`,
-			placeholder: editing ? 'Ctrl + Enter to save' : 'Ctrl + Enter to reply',
+			placeholder: submitShortcutHint(editing ? 'save' : 'reply'),
 			label: editing ? 'Edit post' : 'Write a reply',
 			value: kept?.text ?? (editing ? post.content : ''),
 		}));
@@ -193,16 +214,18 @@ export class InlinePostEditor {
 		setIcon(button, editing ? 'check' : 'send');
 		cancel.addEventListener('click', (event) => {
 			event.stopPropagation();
-			void this.cancel();
+			this.cancelDetached();
 		});
 		button.addEventListener('click', (event) => {
 			event.stopPropagation();
-			void this.save();
+			this.saveDetached();
 		});
 		return { post, input, button, saving: false, key };
 	}
 
 	private activate(draft: InlineDraft): void {
+		// Covers a window move that was not reported while no draft was open.
+		if (this.focusDocument) this.bindFocusEvents();
 		this.active = draft;
 		draft.input.onChange = () => this.updateButton(draft);
 		this.updateButton(draft);
@@ -214,6 +237,14 @@ export class InlinePostEditor {
 		draft.button.setAttribute('aria-busy', String(draft.saving));
 	}
 
+	private cancelDetached(restoreFocus = true, keep = false): void {
+		runDetached(() => this.cancel(restoreFocus, keep), 'close the draft', 'Could not refresh the timeline.');
+	}
+
+	private saveDetached(): void {
+		runDetached(() => this.save(), 'save the draft', 'Could not save your changes.');
+	}
+
 	private async cancel(restoreFocus = true, keep = false): Promise<void> {
 		const draft = this.active;
 		if (!draft) return;
@@ -221,7 +252,9 @@ export class InlinePostEditor {
 		this.clear(restoreFocus, keep);
 		try {
 			if (draft.kind === 'edit') {
-				await this.renderer.restoreCard(draft.card, draft.sourcePost);
+				// A card that cannot render shows an error card; the refresh still runs.
+				await this.renderer.restoreCard(draft.card, draft.post)
+					.catch((error: unknown) => reportFailure(error, 'render the post after closing the edit'));
 				if (!this.disposed && restoreFocus && shouldRestoreFocusWithin(this.root, previousFocus)) {
 					this.callbacks.focusTimeline();
 				}
@@ -245,12 +278,10 @@ export class InlinePostEditor {
 		this.updateButton(draft);
 		let previousFocus: Element | null = null;
 		try {
-			if (draft.kind === 'edit') {
-				const beforeSave = { ...draft.post };
-				await this.service.updatePost(draft.post, content);
-				applyPostUpdate(draft.sourcePost, beforeSave, draft.post);
-			}
-			else await this.service.addReply(draft.post, content);
+			// Text entered during the save is saved against the new post.
+			draft.post = draft.kind === 'edit'
+				? await this.service.updatePost(draft.post, content)
+				: await this.service.addReply(draft.post, content);
 			if (this.keptDrafts.get(draft.key)?.text === content) this.keptDrafts.delete(draft.key);
 			if (this.disposed) return;
 			// A pending save must not close a newer field or discard additional text.

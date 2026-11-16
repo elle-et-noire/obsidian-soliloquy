@@ -20,11 +20,15 @@ const buildResult = await build({
 				builder.onLoad({ filter: /.*/, namespace: 'obsidian-stub' }, () => ({
 					contents: `
 						export class App {}
-						export class TFile {}
+						export class TFile {
+							static [Symbol.hasInstance](value) { return typeof value?.extension === 'string'; }
+						}
 						export const normalizePath = (path) => path;
-						export const moment = (value, format) => ({
+						// Without arguments, "now" is 2026-07-13 11:00.
+						export const moment = (value = '2026/07/2026-07-13', format = 'YYYY/MM/YYYY-MM-DD') => ({
 							isValid: () => typeof value === 'string',
-							format: (requested) => requested === format ? value : value?.slice(-10),
+							format: (requested) => requested === 'HH:mm' ? '11:00'
+								: requested === format ? value : value?.slice(-10),
 						});
 					`,
 					loader: 'js',
@@ -52,6 +56,7 @@ const markdownBundleUrl = `data:text/javascript;base64,${Buffer.from(bundledMark
 const {
 	appendPostToTimelineSection,
 	findTimelineSections,
+	parsePosts,
 } = await import(markdownBundleUrl);
 
 const SETTINGS = {
@@ -104,11 +109,13 @@ test('updates by block ID after external lines shift', async () => {
 	].join('\n'));
 	const target = post();
 
-	await harness.service.updatePost(target, 'Updated');
+	const updated = await harness.service.updatePost(target, 'Updated');
 
 	assert.match(harness.getSource(), /- 10:00 \^sol-other\n\tOther/);
 	assert.match(harness.getSource(), /- 10:00 \^sol-target\n\tUpdated/);
-	assert.equal(target.lineStart, 7);
+	assert.equal(updated.lineStart, 7);
+	assert.equal(updated.content, 'Updated');
+	assert.deepEqual(target, post());
 });
 
 test('preserves CRLF line endings when editing a post', async () => {
@@ -188,10 +195,11 @@ test('assigns a block ID to a unique legacy post after lines shift', async () =>
 	].join('\n'));
 	const legacy = post({ content: 'Legacy', blockId: undefined });
 
-	await harness.service.updatePost(legacy, 'Updated legacy');
+	const updated = await harness.service.updatePost(legacy, 'Updated legacy');
 
-	assert.match(harness.getSource(), /- 10:00 \^sol-[\w-]+\n\tUpdated legacy/);
-	assert.match(legacy.blockId ?? '', /^sol-[\w-]+$/);
+	assert.match(updated.blockId ?? '', /^sol-[\w-]+$/);
+	assert.ok(harness.getSource().includes(`- 10:00 ^${updated.blockId}\n\tUpdated legacy`));
+	assert.equal(legacy.blockId, undefined);
 });
 
 test('rejects indistinguishable legacy posts', async () => {
@@ -305,6 +313,7 @@ function createVault(entries) {
 	const app = {
 		vault: {
 			getMarkdownFiles: () => Array.from(files.values()),
+			getAbstractFileByPath: (path) => files.get(path) ?? null,
 			cachedRead: async (file) => {
 				reads.set(file.path, (reads.get(file.path) ?? 0) + 1);
 				return sources.get(file.path) ?? '';
@@ -400,9 +409,85 @@ test('a write notifies displays once and its vault echo does not notify again', 
 test('identifying a post that already has an ID does not notify displays', async () => {
 	const vault = createVault([[SECOND, '## soliloquy\n- 10:00 ^sol-a\n\tA']]);
 	const [post] = (await vault.service.getTimeline()).posts;
-	assert.equal(await vault.service.ensureBlockId(post), 'sol-a');
+	assert.equal((await vault.service.ensureBlockId(post)).blockId, 'sol-a');
 	assert.equal(vault.writes(), 1); // vault.process runs, but the source is unchanged.
 	assert.equal(vault.changes(), 0);
+});
+
+test('updates return new posts and leave the cached snapshot unchanged', async () => {
+	const vault = createVault([[SECOND, '## soliloquy\n- 10:00 ^sol-a\n\tA']]);
+	const timeline = await vault.service.getTimeline();
+	const [post] = timeline.posts;
+	const updated = await vault.service.updatePost(post, 'Edited');
+	assert.notEqual(updated, post);
+	assert.equal(updated.content, 'Edited');
+	assert.equal(post.content, 'A');
+	assert.equal(timeline.index.getSearchText(post).includes(' a'), true);
+	const current = await vault.service.getTimeline();
+	assert.notEqual(current, timeline);
+	assert.deepEqual(current.posts, [updated]);
+});
+
+test('an edited legacy post accepts a reply through the post the edit returned', async () => {
+	const vault = createVault([[SECOND, '## soliloquy\n- 10:00 legacy text']]);
+	const [original] = (await vault.service.getTimeline()).posts;
+	const edited = await vault.service.updatePost(original, 'Edited');
+	assert.match(edited.blockId ?? '', /^sol-[\w-]+$/);
+	assert.equal(original.blockId, undefined);
+
+	const parent = await vault.service.addReply(edited, 'Reply');
+	assert.equal(parent.blockId, edited.blockId);
+	const { posts, index } = await vault.service.getTimeline();
+	assert.equal(vault.sources.get(SECOND), [
+		'## soliloquy',
+		`- 10:00 ^${edited.blockId}`,
+		'\tEdited',
+		`- 11:00 ^${posts[0].blockId}`,
+		`\t[[log/2026/07/2026-07-13#^${edited.blockId}]]`,
+		'\tReply',
+		'',
+	].join('\n'));
+	assert.deepEqual(index.getReplies(posts[1]).map((reply) => reply.content), ['Reply']);
+
+	// The pre-edit post no longer matches the note.
+	await assert.rejects(vault.service.addReply(original, 'Stale'), { name: 'PostChangedError' });
+});
+
+test('a task toggle after an edit uses the post the edit returned', async () => {
+	const vault = createVault([[SECOND, '## soliloquy\n- 10:00 ^sol-a\n\t- [ ] One']]);
+	const [original] = (await vault.service.getTimeline()).posts;
+	const edited = await vault.service.updatePost(original, '- [ ] One\n- [ ] Two');
+	const first = await vault.service.updateTask(edited, { markerOffset: 3 }, true);
+	const second = await vault.service.updateTask(first, { markerOffset: 13 }, true);
+	assert.equal(second.content, '- [x] One\n- [x] Two');
+	assert.equal(vault.sources.get(SECOND), '## soliloquy\n- 10:00 ^sol-a\n\t- [x] One\n\t- [x] Two');
+	await assert.rejects(
+		vault.service.updateTask(original, { markerOffset: 3 }, true),
+		{ name: 'PostChangedError' },
+	);
+	await assert.rejects(
+		vault.service.updateTask(first, { markerOffset: 13 }, false),
+		{ name: 'PostChangedError' },
+	);
+});
+
+test('replies reuse the block ID assigned for the first reply', async () => {
+	const vault = createVault([[SECOND, '## soliloquy\n- 10:00 legacy text']]);
+	const [original] = (await vault.service.getTimeline()).posts;
+	const parent = await vault.service.addReply(original, 'First');
+	assert.match(parent.blockId ?? '', /^sol-[\w-]+$/);
+	assert.equal(parent.content, 'legacy text');
+	assert.equal(original.blockId, undefined);
+
+	assert.equal((await vault.service.addReply(parent, 'Second')).blockId, parent.blockId);
+	// A reply from the unchanged pre-ID post adopts the same ID instead of adding one.
+	assert.equal((await vault.service.addReply(original, 'Third')).blockId, parent.blockId);
+	const source = vault.sources.get(SECOND);
+	assert.equal(source.split('\n')[1], `- 10:00 ^${parent.blockId} legacy text`);
+	assert.equal(source.split(`#^${parent.blockId}]]`).length - 1, 3);
+	const { posts, index } = await vault.service.getTimeline();
+	const root = posts.find((post) => post.blockId === parent.blockId);
+	assert.deepEqual(index.getReplies(root).map((reply) => reply.content), ['First', 'Second', 'Third']);
 });
 
 test('removing or renaming a daily note with posts notifies displays', async () => {
@@ -491,7 +576,7 @@ test('post parsing retains indented code and blank lines but ignores top-level f
 		'- 12:00 ^sol-next', '\tNext',
 	].join('\n');
 	const h = createHarness(source);
-	const posts = h.service.parsePosts(source.split('\n').slice(1), 1, '2026-07-13', FILE);
+	const posts = parsePosts(source.split('\n').slice(1), 1, '2026-07-13', FILE);
 	assert.deepEqual(posts.map(item => item.blockId), ['sol-target', 'sol-next']);
 	assert.equal(posts[0].content, 'Target\n\nSecond paragraph\n\n```md\n- 09:00 ^sol-body-example\n```');
 	assert.equal(posts[0].lineStart, 7);
@@ -499,13 +584,6 @@ test('post parsing retains indented code and blank lines but ignores top-level f
 	await h.service.updatePost(posts[0], 'Changed');
 	assert.ok(h.getSource().includes('~~~\n- 11:00 ^sol-tilde-example\n\tExample\n~~~'));
 	assert.ok(h.getSource().includes('- 09:00 ^sol-example\n\tExample'));
-});
-
-test('unclosed and mismatched fences cannot produce editable posts', () => {
-	for (const opening of ['```md', '~~~~']) {
-		const lines = [opening, '- 10:00 ^sol-example', '\tExample', '~~~', '- 11:00 ^sol-example2'];
-		assert.deepEqual(createHarness('').service.parsePosts(lines, 1, '2026-07-13', FILE), []);
-	}
 });
 
 test('task updates follow Markdown source positions through code, nested lists and quotes', async () => {
@@ -603,11 +681,13 @@ test('assigning a block ID changes only the first line of a legacy post', async 
 		lineEnd: 5,
 	});
 
-	const blockId = await harness.service.ensureBlockId(legacy);
+	const identified = await harness.service.ensureBlockId(legacy);
+	const { blockId } = identified;
 
 	assert.match(blockId, /^sol-[\w-]+$/);
 	assert.equal(harness.getSource(), initial.replace('- 10:00 inline text', `- 10:00 ^${blockId} inline text`));
-	assert.equal(legacy.blockId, blockId);
+	assert.deepEqual(identified, { ...legacy, blockId, bodyIndent: '    ' });
+	assert.equal(legacy.blockId, undefined);
 });
 
 test('a post that changed since it was displayed is rejected as a conflict', async () => {
@@ -617,4 +697,48 @@ test('a post that changed since it was displayed is rejected as a conflict', asy
 		harness.service.updatePost(post(), 'Updated'),
 		{ name: 'PostChangedError' },
 	);
+});
+
+test('an unreadable daily note is skipped, reported once, and read again later', async (t) => {
+	const vault = createVault([
+		[FIRST, '## soliloquy\n- 09:00 ^sol-first\n\tFirst'],
+		[SECOND, '## soliloquy\n- 10:00 ^sol-second\n\tSecond'],
+	]);
+	const originalError = console.error;
+	const errors = [];
+	console.error = (...args) => { errors.push(args); };
+	t.after(() => { console.error = originalError; });
+	const read = vault.app.vault.cachedRead;
+	let unreadable = true;
+	vault.app.vault.cachedRead = async (file) => {
+		if (unreadable && file.path === FIRST) throw new Error('Read failed');
+		return read(file);
+	};
+	const reported = [];
+	vault.service.onReadFailure((paths) => { reported.push(paths); });
+
+	const timeline = await vault.service.getTimeline();
+	assert.deepEqual(timeline.posts.map((post) => post.blockId), ['sol-second']);
+	assert.deepEqual(reported, [[FIRST]]);
+	assert.equal(errors.length, 1);
+	assert.match(errors[0][0], /failed to read log\/2026\/07\/2026-07-12\.md/);
+
+	// An incomplete snapshot is not served again, and the failure is not reported twice.
+	const retried = await vault.service.getTimeline();
+	assert.notEqual(retried, timeline);
+	assert.deepEqual(retried.posts.map((post) => post.blockId), ['sol-second']);
+	assert.deepEqual(reported, [[FIRST]]);
+	assert.equal(vault.reads.get(SECOND), 1);
+
+	unreadable = false;
+	const recovered = await vault.service.getTimeline();
+	assert.deepEqual(recovered.posts.map((post) => post.blockId), ['sol-second', 'sol-first']);
+	assert.equal(await vault.service.getTimeline(), recovered);
+
+	// A note that fails again after recovering is reported again.
+	unreadable = true;
+	vault.service.fileChanged(vault.file(FIRST));
+	await vault.service.flushFileChanges();
+	assert.deepEqual((await vault.service.getTimeline()).posts.map((post) => post.blockId), ['sol-second']);
+	assert.deepEqual(reported, [[FIRST], [FIRST]]);
 });

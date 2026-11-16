@@ -2,25 +2,25 @@ import { App, moment, TFile } from 'obsidian';
 import type { SoliloquySettings } from '../settings';
 import type { TimelinePost } from '../types';
 import { buildDailyNotePath, parseDailyNoteDate } from './daily-note-path';
+import { DailyNoteSettingsResolver, type ResolvedDailyNotes } from './daily-note-settings';
+import { expandDailyNoteTemplate, findTemplateFile } from './daily-note-template';
 import { PostChangedError } from './errors';
-import { MarkdownFenceTracker } from './markdown-fence';
 import { findMarkdownTasks, type MarkdownTask } from './markdown-tasks';
 import { TimelineIndex } from './timeline-index';
 import {
+	addPostBlockId,
 	appendPostToTimelineSection,
-	findTimelineSections,
-	replaceSourceLines,
+	formatPost,
+	parseTimelinePosts,
+	replacePost,
 } from './timeline-markdown';
-
-const POST_PATTERN = /^- (\d{2}:\d{2})(?:\s+\^([\w-]+))?(?:\s+(.+))?\s*$/;
-const REPLY_LINK_PATTERN = /^\[\[[^\]]*#\^([\w-]+)(?:\|[^\]]+)?\]\]$/;
 
 /** Delay that coalesces bursts of vault events (typing, sync) into one check. */
 const FILE_CHANGE_DELAY_MS = 100;
 
 /** Posts sorted newest first with their index. Shared by every display; do not mutate. */
 export interface TimelineSnapshot {
-	readonly posts: TimelinePost[];
+	readonly posts: readonly TimelinePost[];
 	readonly index: TimelineIndex;
 }
 
@@ -32,8 +32,8 @@ type TimerWindow = Pick<Window, 'setTimeout' | 'clearTimeout'>;
  * and vault changes that alter posts (not edits outside the timeline section).
  */
 export class TimelineService {
-	private readonly postsByFile = new Map<string, TimelinePost[]>();
-	private readonly pendingReads = new Map<string, Promise<TimelinePost[]>>();
+	private readonly postsByFile = new Map<string, readonly TimelinePost[]>();
+	private readonly pendingReads = new Map<string, Promise<readonly TimelinePost[]>>();
 	private readonly fileVersions = new Map<string, number>();
 	/** Daily-note dates by path; cleared when settings change (invalidateAll). */
 	private readonly datesByPath = new Map<string, string | null>();
@@ -42,6 +42,14 @@ export class TimelineService {
 	private version = 0;
 	private snapshot?: { version: number; timeline: Promise<TimelineSnapshot> };
 	private readonly listeners = new Set<() => void>();
+	private readonly readFailureListeners = new Set<(paths: readonly string[]) => void>();
+	private readonly templateFailureListeners = new Set<(templatePath: string) => void>();
+	/** Today's note while it is being created, so concurrent posts share it. */
+	private creatingNote?: { path: string; file: Promise<TFile> };
+	/** Folder, format, and template in effect; changed only by explicit refreshes. */
+	private readonly dailyNotes: DailyNoteSettingsResolver;
+	/** Notes left out of the timeline because they could not be read, already reported. */
+	private readonly unreadablePaths = new Set<string>();
 	/** Vault changes awaiting a check: the current file, or null when removed. */
 	private readonly changedFiles = new Map<string, TFile | null>();
 	private changeTimer?: number;
@@ -50,7 +58,14 @@ export class TimelineService {
 		private readonly app: App,
 		private readonly getSettings: () => SoliloquySettings,
 		private readonly timerWindow?: TimerWindow,
-	) {}
+	) {
+		this.dailyNotes = new DailyNoteSettingsResolver(app, getSettings);
+	}
+
+	/** The daily note folder, format, and template currently in effect. */
+	get dailyNoteSettings(): ResolvedDailyNotes {
+		return this.dailyNotes.current;
+	}
 
 	isDailyNote(file: TFile): boolean {
 		return file.extension === 'md' && this.dateFromPath(file.path) !== null;
@@ -60,6 +75,24 @@ export class TimelineService {
 	onChange(listener: () => void): () => void {
 		this.listeners.add(listener);
 		return () => this.listeners.delete(listener);
+	}
+
+	/**
+	 * Subscribes to daily notes that could not be read and are left out of the
+	 * timeline. A note is reported once until it is read successfully again.
+	 */
+	onReadFailure(listener: (paths: readonly string[]) => void): () => void {
+		this.readFailureListeners.add(listener);
+		return () => this.readFailureListeners.delete(listener);
+	}
+
+	/**
+	 * Subscribes to templates that could not be used for a new daily note.
+	 * The note is created without the template.
+	 */
+	onTemplateFailure(listener: (templatePath: string) => void): () => void {
+		this.templateFailureListeners.add(listener);
+		return () => this.templateFailureListeners.delete(listener);
 	}
 
 	/** A daily note was created or modified in the vault. */
@@ -74,12 +107,26 @@ export class TimelineService {
 
 	/** Settings changed: forget every cached note and notify listeners. */
 	invalidateAll(): void {
+		this.dailyNotes.refresh();
+		this.resetCaches();
+	}
+
+	/**
+	 * Rereads the core Daily notes settings, which Obsidian does not announce
+	 * changes to, and reloads the timeline when the daily note location changed.
+	 */
+	refreshDailyNoteSettings(): void {
+		if (this.dailyNotes.refresh()) this.resetCaches();
+	}
+
+	private resetCaches(): void {
 		this.cacheEpoch += 1;
 		this.postsByFile.clear();
 		this.pendingReads.clear();
 		this.fileVersions.clear();
 		this.datesByPath.clear();
 		this.changedFiles.clear();
+		this.unreadablePaths.clear();
 		this.clearChangeTimer();
 		this.notifyChanged();
 	}
@@ -88,6 +135,8 @@ export class TimelineService {
 		this.clearChangeTimer();
 		this.changedFiles.clear();
 		this.listeners.clear();
+		this.readFailureListeners.clear();
+		this.templateFailureListeners.clear();
 	}
 
 	/**
@@ -121,16 +170,24 @@ export class TimelineService {
 		if (epoch === this.cacheEpoch && results.some(Boolean)) this.notifyChanged();
 	}
 
-	/** Returns the cached snapshot, loading it only after posts changed. */
+	/**
+	 * Returns the cached snapshot, loading it only after posts changed. Notes
+	 * that cannot be read are left out and reported through onReadFailure.
+	 */
 	getTimeline(): Promise<TimelineSnapshot> {
 		if (this.snapshot?.version === this.version) return this.snapshot.timeline;
-		const timeline = this.loadTimeline();
+		const loading = this.loadTimeline();
+		const timeline = loading.then(({ snapshot }) => snapshot);
 		const snapshot = { version: this.version, timeline };
 		this.snapshot = snapshot;
-		// A failed load must not be served again; callers still see the error.
-		timeline.catch(() => {
+		// A failed or incomplete load must not be served again, so the next
+		// request retries the unreadable notes. Callers still see this result.
+		const forget = () => {
 			if (this.snapshot === snapshot) this.snapshot = undefined;
-		});
+		};
+		loading.then(({ complete }) => {
+			if (!complete) forget();
+		}, forget);
 		return timeline;
 	}
 
@@ -179,10 +236,12 @@ export class TimelineService {
 		await this.appendPost(content);
 	}
 
-	async addReply(parent: TimelinePost, content: string): Promise<void> {
-		const parentId = await this.ensureBlockId(parent);
-		const target = parent.file.path.replace(/\.md$/, '');
-		await this.appendPost(content, `[[${target}#^${parentId}]]`);
+	/** Returns the parent as identified for the reply, with its block ID. */
+	async addReply(parent: TimelinePost, content: string): Promise<TimelinePost> {
+		const identified = await this.ensureBlockId(parent);
+		const target = identified.file.path.replace(/\.md$/, '');
+		await this.appendPost(content, `[[${target}#^${identified.blockId}]]`);
+		return identified;
 	}
 
 	private async appendPost(content: string, replyLink?: string): Promise<void> {
@@ -190,7 +249,7 @@ export class TimelineService {
 		if (!text) return;
 
 		const file = await this.getOrCreateTodayNote();
-		const line = this.formatPost(moment().format('HH:mm'), text, this.createBlockId(), replyLink);
+		const line = formatPost(moment().format('HH:mm'), text, this.createBlockId(), replyLink);
 		const heading = this.getSettings().sectionHeading;
 
 		await this.app.vault.process(file, (source) =>
@@ -198,9 +257,10 @@ export class TimelineService {
 		this.fileWritten(file);
 	}
 
-	async updatePost(post: TimelinePost, content: string): Promise<void> {
+	/** Returns the saved post; the given post is left unchanged. */
+	async updatePost(post: TimelinePost, content: string): Promise<TimelinePost> {
 		const text = normalizePostContent(content);
-		if (!text) return;
+		if (!text) return post;
 		const proposedBlockId = post.blockId ?? this.createBlockId();
 		let updatedPost: TimelinePost | undefined;
 
@@ -212,53 +272,84 @@ export class TimelineService {
 				'The post changed before it could be edited.',
 			);
 			const blockId = current.blockId ?? proposedBlockId;
-			const replacement = this.formatPost(
+			const replaced = replacePost(source, current, formatPost(
 				current.time,
 				text,
 				blockId,
 				current.replyLink,
 				current.bodyIndent,
-			).split('\n');
+			));
 			updatedPost = {
 				...current,
 				content: text,
 				blockId,
-				lineEnd: current.lineStart + replacement.length,
+				lineEnd: replaced.lineEnd,
 			};
-			return this.replacePost(source, current, replacement);
+			return replaced.source;
 		});
 
 		if (!updatedPost) throw new Error('The post could not be updated.');
-		Object.assign(post, updatedPost);
 		this.fileWritten(post.file);
+		return updatedPost;
 	}
 
-	async updateTask(post: TimelinePost, task: MarkdownTask, checked: boolean, options?: { verifiedByRenderer: boolean }): Promise<void> {
+	/** Returns the saved post; the given post is left unchanged. */
+	async updateTask(post: TimelinePost, task: MarkdownTask, checked: boolean, options?: { verifiedByRenderer: boolean }): Promise<TimelinePost> {
 		const offset = task.markerOffset;
-		// A renderer-verified position also handles Obsidian syntax that Lezer
-		// cannot classify. The caller must verify the exact post snapshot first.
+		// Without renderer verification, accept only a line-based task candidate.
+		// A verified caller must have rendered the exact post snapshot first.
 		if (!Number.isInteger(offset) || offset < 1 || !/^\[[^\r\n]\][ \t]/.test(post.content.slice(offset - 1))
 			|| (!options?.verifiedByRenderer && !findMarkdownTasks(post.content).some((item) => item.markerOffset === offset))) {
 			throw new Error('The task could not be found in the post.');
 		}
 		const content = post.content.slice(0, offset)
 			+ (checked ? 'x' : ' ') + post.content.slice(offset + 1);
-		await this.updatePost(post, content);
+		return this.updatePost(post, content);
 	}
 
-	private async loadTimeline(): Promise<TimelineSnapshot> {
+	private async loadTimeline(): Promise<{ snapshot: TimelineSnapshot; complete: boolean }> {
 		const files = this.app.vault.getMarkdownFiles().filter((file) => this.isDailyNote(file));
 		const currentPaths = new Set(files.map((file) => file.path));
 		for (const path of this.postsByFile.keys()) {
 			if (!currentPaths.has(path)) this.postsByFile.delete(path);
 		}
+		for (const path of this.unreadablePaths) {
+			if (!currentPaths.has(path)) this.unreadablePaths.delete(path);
+		}
 
-		const posts = (await Promise.all(files.map((file) => this.getFilePosts(file)))).flat();
+		const failed: string[] = [];
+		const posts = (await Promise.all(files.map(async (file) => {
+			try {
+				const filePosts = await this.getFilePosts(file);
+				this.unreadablePaths.delete(file.path);
+				return filePosts;
+			} catch (error) {
+				// One unreadable note must not hide the rest of the timeline.
+				console.error(`Soliloquy: failed to read ${file.path}`, error);
+				failed.push(file.path);
+				return [];
+			}
+		}))).flat();
 		posts.sort(compareNewestFirst);
-		return { posts, index: new TimelineIndex(posts) };
+		this.reportReadFailures(failed);
+		return { snapshot: { posts, index: new TimelineIndex(posts) }, complete: failed.length === 0 };
 	}
 
-	private async getFilePosts(file: TFile): Promise<TimelinePost[]> {
+	/** Tells listeners about notes that newly failed; repeated loads stay quiet. */
+	private reportReadFailures(paths: readonly string[]): void {
+		const newlyFailed = paths.filter((path) => !this.unreadablePaths.has(path));
+		for (const path of newlyFailed) this.unreadablePaths.add(path);
+		if (newlyFailed.length === 0) return;
+		for (const listener of Array.from(this.readFailureListeners)) {
+			try {
+				listener(newlyFailed);
+			} catch (error) {
+				console.error('Soliloquy: read failure listener failed', error);
+			}
+		}
+	}
+
+	private async getFilePosts(file: TFile): Promise<readonly TimelinePost[]> {
 		const cached = this.postsByFile.get(file.path);
 		if (cached) return cached;
 		const pending = this.pendingReads.get(file.path);
@@ -282,99 +373,15 @@ export class TimelineService {
 		}
 	}
 
-	private async readFilePosts(file: TFile): Promise<TimelinePost[]> {
-		const posts: TimelinePost[] = [];
+	private async readFilePosts(file: TFile): Promise<readonly TimelinePost[]> {
 		const date = this.dateFromPath(file.path);
-		if (!date) return posts;
+		if (!date) return [];
 		const source = await this.app.vault.cachedRead(file);
-		const heading = this.getSettings().sectionHeading;
-		for (const section of findTimelineSections(source, heading)) {
-			posts.push(...this.parsePosts(section.lines, section.lineOffset, date, file));
-		}
-		return posts;
+		return parseTimelinePosts(source, this.getSettings().sectionHeading, date, file);
 	}
 
-	private parsePosts(
-		lines: string[],
-		lineOffset: number,
-		date: string,
-		file: TFile,
-	): TimelinePost[] {
-		const posts: TimelinePost[] = [];
-		let current: ParsedPost | null = null;
-		let blankLines = 0;
-		const fence = new MarkdownFenceTracker();
-
-		for (const [index, line] of lines.entries()) {
-			// Stored body lines belong to the post, including its indented code fences.
-			if (current && (line.startsWith('\t') || line.startsWith('  '))) {
-				for (let blank = 0; blank < blankLines; blank++) current.body.push('');
-				current.body.push(line);
-				current.post.lineEnd = lineOffset + index + 1;
-				blankLines = 0;
-				continue;
-			}
-			if (!line.trim()) {
-				if (current) blankLines++;
-				continue;
-			}
-			// Never extend a replacement range across unrelated paragraphs or lists.
-			if (current) posts.push(this.withReplyMetadata(finishPost(current)));
-			current = null;
-			blankLines = 0;
-			if (fence.consume(line)) continue;
-			const match = POST_PATTERN.exec(line);
-			if (match?.[1]) {
-				current = {
-					post: {
-						date,
-						time: match[1],
-						content: '',
-						file,
-						lineStart: lineOffset + index,
-						lineEnd: lineOffset + index + 1,
-						blockId: match[2],
-					},
-					inline: match[3],
-					body: [],
-				};
-				continue;
-			}
-		}
-
-		if (current) posts.push(this.withReplyMetadata(finishPost(current)));
-		return posts;
-	}
-
-	private formatPost(
-		time: string,
-		content: string,
-		blockId: string,
-		replyLink?: string,
-		indent = '\t',
-	): string {
-		// Tab-indented posts keep their historic tab-only blank lines.
-		const indentLine = (line: string) => (line || indent === '\t' ? `${indent}${line}` : '');
-		return [
-			`- ${time} ^${blockId}`,
-			...(replyLink ? [indentLine(replyLink)] : []),
-			...content.split('\n').map(indentLine),
-		].join('\n');
-	}
-
-	private withReplyMetadata(post: TimelinePost): TimelinePost {
-		const lines = post.content.split('\n');
-		const match = lines[0] ? REPLY_LINK_PATTERN.exec(lines[0]) : null;
-		if (!match?.[1]) return post;
-		return {
-			...post,
-			content: lines.slice(1).join('\n'),
-			replyToBlockId: match[1],
-			replyLink: lines[0],
-		};
-	}
-
-	private async ensureBlockId(post: TimelinePost): Promise<string> {
+	/** Returns the current post with a block ID, assigning one when it has none. */
+	private async ensureBlockId(post: TimelinePost): Promise<TimelinePost> {
 		const proposedBlockId = post.blockId ?? this.createBlockId();
 		let updatedPost: TimelinePost | undefined;
 		let written = false;
@@ -393,17 +400,15 @@ export class TimelineService {
 			written = true;
 
 			// Only the first line changes, so the body keeps its exact formatting.
-			const firstLine = source.split(/\r?\n/)[current.lineStart] ?? '';
-			const identified = firstLine.replace(/^- (\d{2}:\d{2})/, `- $1 ^${proposedBlockId}`);
-			if (identified === firstLine) throw new PostChangedError('The parent post changed.');
+			const identified = addPostBlockId(source, current, proposedBlockId);
+			if (identified === null) throw new PostChangedError('The parent post changed.');
 			updatedPost = { ...current, blockId: proposedBlockId };
-			return replaceSourceLines(source, current.lineStart, current.lineStart + 1, [identified]);
+			return identified;
 		});
 
 		if (!updatedPost?.blockId) throw new Error('The parent post could not be identified.');
-		Object.assign(post, updatedPost);
 		if (written) this.fileWritten(post.file);
-		return updatedPost.blockId;
+		return updatedPost;
 	}
 
 	private findCurrentPost(
@@ -412,14 +417,12 @@ export class TimelineService {
 		requireUnchanged: boolean,
 		errorMessage: string,
 	): TimelinePost {
-		const heading = this.getSettings().sectionHeading;
-		const candidates = findTimelineSections(source, heading).flatMap((section) =>
-			this.parsePosts(
-				section.lines,
-				section.lineOffset,
-				post.date,
-				post.file,
-			));
+		const candidates = parseTimelinePosts(
+			source,
+			this.getSettings().sectionHeading,
+			post.date,
+			post.file,
+		);
 		const matches = post.blockId
 			? candidates.filter((candidate) => candidate.blockId === post.blockId)
 			: candidates.filter((candidate) => this.hasSameSnapshot(candidate, post));
@@ -438,14 +441,6 @@ export class TimelineService {
 			&& current.replyLink === expected.replyLink;
 	}
 
-	private replacePost(
-		source: string,
-		current: TimelinePost,
-		replacement: string[],
-	): string {
-		return replaceSourceLines(source, current.lineStart, current.lineEnd, replacement);
-	}
-
 	private createBlockId(): string {
 		return `sol-${crypto.randomUUID()}`;
 	}
@@ -453,19 +448,38 @@ export class TimelineService {
 	private dateFromPath(path: string): string | null {
 		const cached = this.datesByPath.get(path);
 		if (cached !== undefined) return cached;
-		const date = parseDailyNoteDate(path, this.getSettings());
+		const date = parseDailyNoteDate(path, this.dailyNotes.current);
 		this.datesByPath.set(path, date);
 		return date;
 	}
 
 	private async getOrCreateTodayNote(): Promise<TFile> {
-		const settings = this.getSettings();
-		const path = buildDailyNotePath(settings);
+		// Core Daily notes settings may have changed since they were last read.
+		this.refreshDailyNoteSettings();
+		const settings = this.dailyNotes.current;
+		const now = moment();
+		const path = buildDailyNotePath(settings, now);
 		const existing = this.app.vault.getAbstractFileByPath(path);
 		if (existing instanceof TFile) return existing;
+		if (this.creatingNote?.path === path) return this.creatingNote.file;
 
+		const file = this.createDailyNote(path, settings, now);
+		const creating = { path, file };
+		this.creatingNote = creating;
+		try {
+			return await file;
+		} finally {
+			if (this.creatingNote === creating) this.creatingNote = undefined;
+		}
+	}
+
+	private async createDailyNote(
+		path: string,
+		settings: ResolvedDailyNotes,
+		now: ReturnType<typeof moment>,
+	): Promise<TFile> {
 		const parts = path.split('/');
-		parts.pop();
+		const name = parts.pop() ?? path;
 		let current = '';
 		for (const part of parts) {
 			current = current ? `${current}/${part}` : part;
@@ -473,40 +487,42 @@ export class TimelineService {
 				await this.app.vault.createFolder(current);
 			}
 		}
-		return this.app.vault.create(path, '');
+
+		const content = await this.readDailyNoteTemplate(settings, now, name.replace(/\.md$/, ''));
+		try {
+			return await this.app.vault.create(path, content);
+		} catch (error) {
+			// Another plugin or a sync may have created the note meanwhile.
+			const created = this.app.vault.getAbstractFileByPath(path);
+			if (created instanceof TFile) return created;
+			throw error;
+		}
 	}
-}
 
-interface ParsedPost {
-	post: TimelinePost;
-	inline?: string;
-	/** Raw continuation lines, with '' for blank lines between them. */
-	body: string[];
-}
-
-/** Removes one indentation unit and remembers it so edits can write it back. */
-function finishPost({ post, inline, body }: ParsedPost): TimelinePost {
-	const indented = body.filter((line) => line.trim());
-	const spaceWidths = indented
-		.filter((line) => line.startsWith(' '))
-		.map((line) => line.length - line.trimStart().length);
-	const spaceUnit = spaceWidths.length > 0 ? Math.min(...spaceWidths) : 2;
-	const bodyIndent = indented[0]?.startsWith(' ') ? ' '.repeat(spaceUnit) : '\t';
-	const bodyLines = body.map((line) => {
-		if (line.startsWith('\t')) return line.slice(1);
-		const width = line.length - line.trimStart().length;
-		return line.slice(Math.min(width, spaceUnit));
-	});
-	// Without inline text, blank lines before the first body line are not content.
-	const firstBody = bodyLines.findIndex((line) => line !== '');
-	const parts = inline === undefined
-		? (firstBody < 0 ? [] : bodyLines.slice(firstBody))
-		: [inline, ...bodyLines];
-	return {
-		...post,
-		content: parts.join('\n'),
-		...(body.length > 0 ? { bodyIndent } : {}),
-	};
+	/** Returns the expanded template, or an empty note when there is none or it fails. */
+	private async readDailyNoteTemplate(
+		settings: ResolvedDailyNotes,
+		now: ReturnType<typeof moment>,
+		title: string,
+	): Promise<string> {
+		if (!settings.template) return '';
+		try {
+			const file = findTemplateFile(this.app, settings.template);
+			if (!file) throw new Error('The template file was not found.');
+			const template = await this.app.vault.cachedRead(file);
+			return expandDailyNoteTemplate(template, now, settings.dailyNoteFormat, title);
+		} catch (error) {
+			console.error(`Soliloquy: could not use the daily note template ${settings.template}`, error);
+			for (const listener of Array.from(this.templateFailureListeners)) {
+				try {
+					listener(settings.template);
+				} catch (listenerError) {
+					console.error('Soliloquy: template failure listener failed', listenerError);
+				}
+			}
+			return '';
+		}
+	}
 }
 
 function compareText(a: string, b: string): number {
@@ -522,7 +538,7 @@ function compareNewestFirst(a: TimelinePost, b: TimelinePost): number {
 }
 
 /** Everything about a note's posts that affects the timeline, to detect real changes. */
-function postsSignature(posts: TimelinePost[]): string {
+function postsSignature(posts: readonly TimelinePost[]): string {
 	return posts.map((post) => [
 		post.date,
 		post.time,

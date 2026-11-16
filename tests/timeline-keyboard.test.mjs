@@ -4,19 +4,40 @@ import { build } from 'esbuild';
 import { Scope, KeyboardOwner, createRoot, createInput, press } from './keyboard-harness.mjs';
 
 const result = await build({
-	entryPoints: ['src/ui/timeline-keyboard.ts'], bundle: true, format: 'esm', write: false,
+	stdin: {
+		contents: `
+			export * from './src/ui/timeline-keyboard';
+			export { Platform } from 'obsidian';
+		`,
+		resolveDir: process.cwd(),
+	},
+	bundle: true, format: 'esm', write: false,
+	plugins: [{
+		name: 'platform-harness',
+		setup(builder) {
+			builder.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian', namespace: 'harness' }));
+			builder.onLoad({ filter: /.*/, namespace: 'harness' }, () => ({
+				contents: 'export const Platform = { isMacOS: false };', loader: 'js',
+			}));
+		},
+	}],
 });
 const source = result.outputFiles[0]?.text;
 if (!source) throw new Error('Timeline keyboard bundle was not generated.');
-const { registerTimelineKeyboard } = await import(
+const { registerTimelineKeyboard, submitShortcutHint, submitKeyShortcut, Platform } = await import(
 	`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
 );
 
-function harness() {
+/** An element outside the panel, such as another pane's field or the status bar. */
+function createOutside(root) {
+	return { nodeType: 1, focus() { root.ownerDocument.activeElement = this; } };
+}
+
+function harness({ boundary } = {}) {
 	const owner = new KeyboardOwner();
 	const parent = new Scope();
 	const scope = new Scope(parent);
-	const root = createRoot();
+	const root = createRoot({ activeElement: null, body: { nodeType: 1 } });
 	const post = createInput(root);
 	const search = createInput(root, 'search');
 	const actions = {
@@ -25,7 +46,7 @@ function harness() {
 		submit: () => false,
 		goBack: () => false,
 	};
-	registerTimelineKeyboard(owner, scope, root, actions);
+	registerTimelineKeyboard(owner, scope, root, actions, boundary?.(root));
 	return { owner, parent, scope, root, post, search, actions };
 }
 
@@ -151,4 +172,78 @@ test('unloading removes DOM and scope handlers and each display remembers its ow
 	assert.equal(first.scope.keys.length, 0);
 	assert.equal(first.root.listeners.get('focusin').size, 0);
 	assert.equal(first.root.listeners.get('keydown').size, 0);
+});
+
+test('keys aimed outside the panel keep their own behavior while the display is active', () => {
+	for (const event of [
+		{ key: '/' }, { key: 'Escape' }, { key: 'Escape', shiftKey: true },
+		{ key: 'Enter', ctrlKey: true }, { key: 'ArrowLeft', altKey: true },
+	]) {
+		const { parent, scope, root, actions } = harness();
+		const outside = createOutside(root);
+		let passedThrough = 0;
+		parent.register(null, event.key, () => { passedThrough++; });
+		actions.leaveDisplay = () => assert.fail('Must not leave the display');
+		actions.focus = () => assert.fail('Must not take focus from the other element');
+		actions.submit = () => assert.fail('Must not submit');
+		actions.goBack = () => assert.fail('Must not navigate');
+		outside.focus();
+		const pressed = press(scope, root, event);
+		assert.equal(pressed.defaultPrevented, false);
+		assert.equal(pressed.stopped, false);
+		assert.equal(passedThrough, 1);
+		assert.equal(root.ownerDocument.activeElement, outside);
+	}
+});
+
+test('with nothing focused, slash and Escape still act on the active display', () => {
+	const { scope, root, post, actions } = harness();
+	let exits = 0;
+	actions.leaveDisplay = () => { exits++; };
+	root.ownerDocument.activeElement = root.ownerDocument.body;
+	assert.equal(press(scope, root, { key: '/' }).defaultPrevented, true);
+	assert.equal(root.ownerDocument.activeElement, post);
+	root.ownerDocument.activeElement = root.ownerDocument.body;
+	assert.equal(press(scope, root).defaultPrevented, true);
+	assert.equal(exits, 1);
+});
+
+test('a host boundary such as a focused modal container receives the shortcuts', () => {
+	let container;
+	const { scope, root, post, actions } = harness({ boundary: root => {
+		container = createOutside(root);
+		container.contains = element => element === container || root.contains(element);
+		return container;
+	} });
+	let exits = 0;
+	actions.leaveDisplay = () => { exits++; };
+	container.focus();
+	assert.equal(press(scope, root, { key: '/' }).defaultPrevented, true);
+	assert.equal(root.ownerDocument.activeElement, post);
+	container.focus();
+	assert.equal(press(scope, root).defaultPrevented, true);
+	assert.equal(exits, 1);
+	const outside = createOutside(root);
+	outside.focus();
+	assert.equal(press(scope, root, { key: '/' }).defaultPrevented, false);
+	assert.equal(root.ownerDocument.activeElement, outside);
+});
+
+test('submit uses Cmd+Enter on macOS and Ctrl+Enter elsewhere', (t) => {
+	t.after(() => { Platform.isMacOS = false; });
+	for (const isMacOS of [false, true]) {
+		Platform.isMacOS = isMacOS;
+		const { scope, root, post, actions } = harness();
+		let submits = 0;
+		actions.submit = () => { submits++; return true; };
+		post.focus();
+		const mod = isMacOS ? { metaKey: true } : { ctrlKey: true };
+		const other = isMacOS ? { ctrlKey: true } : { metaKey: true };
+		assert.equal(press(scope, root, { key: 'Enter', ...other }).defaultPrevented, false);
+		assert.equal(submits, 0);
+		assert.equal(press(scope, root, { key: 'Enter', ...mod }).defaultPrevented, true);
+		assert.equal(submits, 1);
+		assert.equal(submitShortcutHint('post'), isMacOS ? '⌘ + Enter to post' : 'Ctrl + Enter to post');
+		assert.equal(submitKeyShortcut(), isMacOS ? 'Meta+Enter' : 'Control+Enter');
+	}
 });
