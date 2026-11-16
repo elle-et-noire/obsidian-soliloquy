@@ -561,3 +561,8 @@
 		padding: var(--size-4-2) var(--size-4-3);
 	}
 }
+
+/* Holds the list height while a background refresh re-renders it. */
+.soliloquy-timeline.is-height-locked {
+	min-height: var(--soliloquy-locked-height);
+}

@@ -2,12 +2,13 @@ import { App, moment, TFile } from 'obsidian';
 import type { SoliloquySettings } from '../settings';
 import type { TimelinePost } from '../types';
 import { buildDailyNotePath, parseDailyNoteDate } from './daily-note-path';
+import { PostChangedError } from './errors';
 import { MarkdownFenceTracker } from './markdown-fence';
 import { findMarkdownTasks, type MarkdownTask } from './markdown-tasks';
 import {
 	appendPostToTimelineSection,
-	detectLineEnding,
 	findTimelineSections,
+	replaceSourceLines,
 } from './timeline-markdown';
 
 const POST_PATTERN = /^- (\d{2}:\d{2})(?:\s+\^([\w-]+))?(?:\s+(.+))?\s*$/;
@@ -17,6 +18,8 @@ export class TimelineService {
 	private readonly postsByFile = new Map<string, TimelinePost[]>();
 	private readonly pendingReads = new Map<string, Promise<TimelinePost[]>>();
 	private readonly fileVersions = new Map<string, number>();
+	/** Daily-note dates by path; cleared when settings change (invalidateAll). */
+	private readonly datesByPath = new Map<string, string | null>();
 	private cacheEpoch = 0;
 
 	constructor(
@@ -25,8 +28,7 @@ export class TimelineService {
 	) {}
 
 	isDailyNote(file: TFile): boolean {
-		return file.extension === 'md'
-			&& parseDailyNoteDate(file.path, this.getSettings()) !== null;
+		return file.extension === 'md' && this.dateFromPath(file.path) !== null;
 	}
 
 	invalidateFile(file: TFile): void {
@@ -44,6 +46,7 @@ export class TimelineService {
 		this.postsByFile.clear();
 		this.pendingReads.clear();
 		this.fileVersions.clear();
+		this.datesByPath.clear();
 	}
 
 	async addPost(content: string): Promise<void> {
@@ -57,12 +60,12 @@ export class TimelineService {
 	}
 
 	private async appendPost(content: string, replyLink?: string): Promise<void> {
-		const text = content.replace(/\r\n?/g, '\n').trim();
+		const text = normalizePostContent(content);
 		if (!text) return;
 
 		const file = await this.getOrCreateTodayNote();
 		const line = this.formatPost(moment().format('HH:mm'), text, this.createBlockId(), replyLink);
-		const heading = `## ${this.getSettings().sectionHeading}`;
+		const heading = this.getSettings().sectionHeading;
 
 		await this.app.vault.process(file, (source) =>
 			appendPostToTimelineSection(source, heading, line));
@@ -70,7 +73,7 @@ export class TimelineService {
 	}
 
 	async updatePost(post: TimelinePost, content: string): Promise<void> {
-		const text = content.replace(/\r\n?/g, '\n').trim();
+		const text = normalizePostContent(content);
 		if (!text) return;
 		const proposedBlockId = post.blockId ?? this.createBlockId();
 		let updatedPost: TimelinePost | undefined;
@@ -88,6 +91,7 @@ export class TimelineService {
 				text,
 				blockId,
 				current.replyLink,
+				current.bodyIndent,
 			).split('\n');
 			updatedPost = {
 				...current,
@@ -162,7 +166,7 @@ export class TimelineService {
 		const date = this.dateFromPath(file.path);
 		if (!date) return posts;
 		const source = await this.app.vault.cachedRead(file);
-		const heading = `## ${this.getSettings().sectionHeading}`;
+		const heading = this.getSettings().sectionHeading;
 		for (const section of findTimelineSections(source, heading)) {
 			posts.push(...this.parsePosts(section.lines, section.lineOffset, date, file));
 		}
@@ -176,16 +180,16 @@ export class TimelineService {
 		file: TFile,
 	): TimelinePost[] {
 		const posts: TimelinePost[] = [];
-		let current: TimelinePost | null = null;
+		let current: ParsedPost | null = null;
 		let blankLines = 0;
 		const fence = new MarkdownFenceTracker();
 
 		for (const [index, line] of lines.entries()) {
 			// Stored body lines belong to the post, including its indented code fences.
 			if (current && (line.startsWith('\t') || line.startsWith('  '))) {
-				const continuation = line.startsWith('\t') ? line.slice(1) : line.slice(2);
-				current.content += current.content ? `\n${'\n'.repeat(blankLines)}${continuation}` : continuation;
-				current.lineEnd = lineOffset + index + 1;
+				for (let blank = 0; blank < blankLines; blank++) current.body.push('');
+				current.body.push(line);
+				current.post.lineEnd = lineOffset + index + 1;
 				blankLines = 0;
 				continue;
 			}
@@ -194,34 +198,46 @@ export class TimelineService {
 				continue;
 			}
 			// Never extend a replacement range across unrelated paragraphs or lists.
-			if (current) posts.push(this.withReplyMetadata(current));
+			if (current) posts.push(this.withReplyMetadata(finishPost(current)));
 			current = null;
 			blankLines = 0;
 			if (fence.consume(line)) continue;
 			const match = POST_PATTERN.exec(line);
 			if (match?.[1]) {
 				current = {
-					date,
-					time: match[1],
-					content: match[3] ?? '',
-					file,
-					lineStart: lineOffset + index,
-					lineEnd: lineOffset + index + 1,
-					blockId: match[2],
+					post: {
+						date,
+						time: match[1],
+						content: '',
+						file,
+						lineStart: lineOffset + index,
+						lineEnd: lineOffset + index + 1,
+						blockId: match[2],
+					},
+					inline: match[3],
+					body: [],
 				};
 				continue;
 			}
 		}
 
-		if (current) posts.push(this.withReplyMetadata(current));
+		if (current) posts.push(this.withReplyMetadata(finishPost(current)));
 		return posts;
 	}
 
-	private formatPost(time: string, content: string, blockId: string, replyLink?: string): string {
+	private formatPost(
+		time: string,
+		content: string,
+		blockId: string,
+		replyLink?: string,
+		indent = '\t',
+	): string {
+		// Tab-indented posts keep their historic tab-only blank lines.
+		const indentLine = (line: string) => (line || indent === '\t' ? `${indent}${line}` : '');
 		return [
 			`- ${time} ^${blockId}`,
-			...(replyLink ? [`\t${replyLink}`] : []),
-			...content.split('\n').map((line) => `\t${line}`),
+			...(replyLink ? [indentLine(replyLink)] : []),
+			...content.split('\n').map(indentLine),
 		].join('\n');
 	}
 
@@ -252,18 +268,12 @@ export class TimelineService {
 				return source;
 			}
 
-			const replacement = this.formatPost(
-				current.time,
-				current.content,
-				proposedBlockId,
-				current.replyLink,
-			).split('\n');
-			updatedPost = {
-				...current,
-				blockId: proposedBlockId,
-				lineEnd: current.lineStart + replacement.length,
-			};
-			return this.replacePost(source, current, replacement);
+			// Only the first line changes, so the body keeps its exact formatting.
+			const firstLine = source.split(/\r?\n/)[current.lineStart] ?? '';
+			const identified = firstLine.replace(/^- (\d{2}:\d{2})/, `- $1 ^${proposedBlockId}`);
+			if (identified === firstLine) throw new PostChangedError('The parent post changed.');
+			updatedPost = { ...current, blockId: proposedBlockId };
+			return replaceSourceLines(source, current.lineStart, current.lineStart + 1, [identified]);
 		});
 
 		if (!updatedPost?.blockId) throw new Error('The parent post could not be identified.');
@@ -278,7 +288,7 @@ export class TimelineService {
 		requireUnchanged: boolean,
 		errorMessage: string,
 	): TimelinePost {
-		const heading = `## ${this.getSettings().sectionHeading}`;
+		const heading = this.getSettings().sectionHeading;
 		const candidates = findTimelineSections(source, heading).flatMap((section) =>
 			this.parsePosts(
 				section.lines,
@@ -290,10 +300,10 @@ export class TimelineService {
 			? candidates.filter((candidate) => candidate.blockId === post.blockId)
 			: candidates.filter((candidate) => this.hasSameSnapshot(candidate, post));
 
-		if (matches.length !== 1) throw new Error(errorMessage);
+		if (matches.length !== 1) throw new PostChangedError(errorMessage);
 		const current = matches[0];
 		if (!current || (requireUnchanged && !this.hasSameSnapshot(current, post))) {
-			throw new Error(errorMessage);
+			throw new PostChangedError(errorMessage);
 		}
 		return current;
 	}
@@ -309,14 +319,7 @@ export class TimelineService {
 		current: TimelinePost,
 		replacement: string[],
 	): string {
-		const lineEnding = detectLineEnding(source);
-		const lines = source.split(/\r?\n/);
-		lines.splice(
-			current.lineStart,
-			current.lineEnd - current.lineStart,
-			...replacement,
-		);
-		return lines.join(lineEnding);
+		return replaceSourceLines(source, current.lineStart, current.lineEnd, replacement);
 	}
 
 	private createBlockId(): string {
@@ -324,7 +327,11 @@ export class TimelineService {
 	}
 
 	private dateFromPath(path: string): string | null {
-		return parseDailyNoteDate(path, this.getSettings());
+		const cached = this.datesByPath.get(path);
+		if (cached !== undefined) return cached;
+		const date = parseDailyNoteDate(path, this.getSettings());
+		this.datesByPath.set(path, date);
+		return date;
 	}
 
 	private async getOrCreateTodayNote(): Promise<TFile> {
@@ -344,4 +351,44 @@ export class TimelineService {
 		}
 		return this.app.vault.create(path, '');
 	}
+}
+
+interface ParsedPost {
+	post: TimelinePost;
+	inline?: string;
+	/** Raw continuation lines, with '' for blank lines between them. */
+	body: string[];
+}
+
+/** Removes one indentation unit and remembers it so edits can write it back. */
+function finishPost({ post, inline, body }: ParsedPost): TimelinePost {
+	const indented = body.filter((line) => line.trim());
+	const spaceWidths = indented
+		.filter((line) => line.startsWith(' '))
+		.map((line) => line.length - line.trimStart().length);
+	const spaceUnit = spaceWidths.length > 0 ? Math.min(...spaceWidths) : 2;
+	const bodyIndent = indented[0]?.startsWith(' ') ? ' '.repeat(spaceUnit) : '\t';
+	const bodyLines = body.map((line) => {
+		if (line.startsWith('\t')) return line.slice(1);
+		const width = line.length - line.trimStart().length;
+		return line.slice(Math.min(width, spaceUnit));
+	});
+	// Without inline text, blank lines before the first body line are not content.
+	const firstBody = bodyLines.findIndex((line) => line !== '');
+	const parts = inline === undefined
+		? (firstBody < 0 ? [] : bodyLines.slice(firstBody))
+		: [inline, ...bodyLines];
+	return {
+		...post,
+		content: parts.join('\n'),
+		...(body.length > 0 ? { bodyIndent } : {}),
+	};
+}
+
+/** Normalizes line breaks and outer blank lines without changing indentation. */
+function normalizePostContent(content: string): string {
+	return content
+		.replace(/\r\n?/g, '\n')
+		.replace(/^(?:[ \t]*\n)+/, '')
+		.trimEnd();
 }

@@ -25,6 +25,7 @@ const result = await build({
 		export { SoliloquyComposer } from './src/ui/composer';
 		export { TimelinePanel } from './src/ui/timeline-panel';
 		export { TimelineService } from './src/services/timeline-service';
+		export { PostChangedError } from './src/services/errors';
 		export { PostCardRenderer } from './src/ui/post-card';
 		export { MarkdownRenderer } from './tests/editor-dom-harness.mjs';
 		export { registerTimelineKeyboard } from './src/ui/timeline-keyboard';
@@ -35,7 +36,7 @@ const result = await build({
 });
 const source = result.outputFiles[0]?.text;
 if (!source) throw new Error('Editor test bundle was not generated.');
-const { SoliloquyTextEditor, SoliloquyComposer, TimelinePanel, TimelineService, PostCardRenderer, MarkdownRenderer, registerTimelineKeyboard, getCM } = await import(
+const { SoliloquyTextEditor, SoliloquyComposer, TimelinePanel, TimelineService, PostChangedError, PostCardRenderer, MarkdownRenderer, registerTimelineKeyboard, getCM } = await import(
 	`data:text/javascript;base64,${Buffer.from(source + '\n//# sourceURL=soliloquy-editor-tests.js').toString('base64')}`
 );
 
@@ -1025,6 +1026,51 @@ test('ID assignment during a task save still publishes the matching saved post',
 	const first = h.root.querySelector('.soliloquy-post');
 	first.querySelector('.soliloquy-edit-button').click();
 	assert.equal(h.panel.inlineEditor.active.input.value, '- [x] Task');
+});
+
+test('drafts closed by another field are kept for their post until explicitly cancelled', async t => {
+	const h = await panelHarness(t);
+	for (const kind of ['edit', 'reply']) {
+		h[kind]('first');
+		h.panel.inlineEditor.active.input.value = `Kept ${kind}`;
+		h.panel.focus('post');
+		await settle();
+		assert.equal(h.panel.inlineEditor.active, undefined, kind);
+		h[kind]('second');
+		assert.equal(h.panel.inlineEditor.active.input.value, kind === 'edit' ? 'Saved second' : '', kind);
+		h.panel.focus('post');
+		await settle();
+		h[kind]('first');
+		await settle();
+		assert.equal(h.panel.inlineEditor.active.input.value, `Kept ${kind}`, kind);
+		h.root.querySelector(`[aria-label="Cancel ${kind}"]`).click();
+		await settle();
+		h[kind]('first');
+		await settle();
+		assert.equal(h.panel.inlineEditor.active.input.value, kind === 'edit' ? 'Saved first' : '', kind);
+		h.root.querySelector(`[aria-label="Cancel ${kind}"]`).click();
+		await settle();
+	}
+});
+
+test('an edit rejected because the post changed shows the current post and keeps the text', async t => {
+	const h = await panelHarness(t);
+	const originalError = console.error;
+	console.error = () => {};
+	t.after(() => { console.error = originalError; });
+	h.service.updatePost = async () => { throw new PostChangedError('The post changed before it could be edited.'); };
+	h.edit('first');
+	const draft = h.panel.inlineEditor.active;
+	draft.input.value = 'My edit';
+	h.posts[0].content = 'Changed elsewhere';
+	draft.button.click();
+	await settle();
+	await settle();
+	assert.equal(h.panel.inlineEditor.active, undefined);
+	assert.equal(h.card('first').querySelector('.soliloquy-post-content').textContent, 'Changed elsewhere');
+	h.edit('first');
+	await settle();
+	assert.equal(h.panel.inlineEditor.active.input.value, 'My edit');
 });
 
 test.after(() => dom.window.close());

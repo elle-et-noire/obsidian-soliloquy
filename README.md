@@ -26,7 +26,9 @@ Soliloquy creates today's note when needed and writes below a configurable level
 	- [ ] Follow up later
 ```
 
-The block ID lets Soliloquy locate a post safely after other lines are inserted. Replies are regular posts containing an Obsidian block link to their parent. You can read and edit the files normally; keep the timestamp line, indentation, and block ID intact if you edit a post by hand.
+The block ID lets Soliloquy locate a post safely after other lines are inserted. Replies are regular posts containing an Obsidian block link to their parent. You can read and edit the files normally; keep the timestamp line, indentation, and block ID intact if you edit a post by hand. Body lines may be indented with a tab or with spaces; edits keep the indentation the post already uses.
+
+The timeline section is the level-two heading whose text matches the **Timeline heading** setting, ignoring letter case, extra spaces, and closing `#` characters. It ends at the next level-one or level-two heading; deeper headings stay inside it. Headings in code blocks and comments (`%% %%`, `<!-- -->`) are ignored. A note with more than one matching section is not changed. Soliloquy creates today's note as an empty file, so templates from the Daily notes or Templater plugins are not applied to it.
 
 ## Usage
 
@@ -59,7 +61,8 @@ Sidebar, tab, and modal displays share the same input shortcuts:
 - In Vim Insert mode, `Tab` indents the current or selected lines and `Shift+Tab` removes one level of indentation. In Normal mode, both keys keep their standard forward/backward focus navigation.
 - `Esc` inside a post, search, edit, or reply input stays in the editor. With Vim enabled, it exits Insert/Visual mode or cancels a Vim command. Repeated presses never close the display.
 - `Shift+Esc` in search returns to the post input, carrying over the text and selection. In a post, edit, or reply input, it moves focus to the timeline without discarding the draft or selection. IME composition and held-key repeats do not change focus or close the display.
-- Only one edit or reply input stays open in each display. Moving focus to another text field (including the post/search input or a note editor) cancels the edit or reply, just like its cancel button. Focusing a button or the timeline keeps the draft, as do Vim prompts within the same input.
+- Only one edit or reply input stays open in each display. Moving focus to another text field (including the post/search input or a note editor) closes the edit or reply. Changed text is kept and returns when you open the same edit or reply again; the cancel button discards it. Focusing a button or the timeline keeps the draft open, as do Vim prompts within the same input.
+- If a post changed in its note after you started editing it, saving shows the current post and keeps your text. Open the edit again to review and save it.
 - Outside text fields, `/` returns to the last visible text field without inserting a slash. If that field is no longer visible, it focuses the main composer (preserving search mode when returning from search). Inside text fields, `/` is entered normally.
 - Outside text fields, either `Esc` or `Shift+Esc` closes a modal. A sidebar or regular tab stays open and focus moves to another main workspace pane; if there is no other pane, focus leaves the Soliloquy content.
 
@@ -83,7 +86,7 @@ Open **Settings → Soliloquy** to configure:
 - **Daily note format**: Moment-style path below that folder. Default: `YYYY/MM/YYYY-MM-DD`.
 - **Timeline heading**: The level-two heading under which posts are stored. Default: `soliloquy`.
 
-The folder and format must describe the same files you want Soliloquy to read. Changing them does not move existing notes.
+The folder and format must describe the same files you want Soliloquy to read. Changing them does not move existing notes, and changing the heading hides posts stored under the previous heading until you rename it in those notes.
 
 ## Installation
 

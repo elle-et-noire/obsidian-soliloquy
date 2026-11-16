@@ -10,4 +10,6 @@ export interface TimelinePost {
 	blockId?: string;
 	replyToBlockId?: string;
 	replyLink?: string;
+	/** Indentation of the body lines in the note, written back on edits. */
+	bodyIndent?: string;
 }

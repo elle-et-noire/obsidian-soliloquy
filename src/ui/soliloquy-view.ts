@@ -1,4 +1,4 @@
-import { ItemView, Scope, WorkspaceLeaf } from 'obsidian';
+import { ItemView, Notice, Scope, WorkspaceLeaf } from 'obsidian';
 import type { TimelineService } from '../services/timeline-service';
 import { TimelinePanel, type SoliloquyFocusTarget } from './timeline-panel';
 
@@ -25,10 +25,16 @@ export class SoliloquyView extends ItemView {
 		return 'messages-square';
 	}
 
-	async onOpen(): Promise<void> {
-		this.panel = this.addChild(new TimelinePanel(this.app, this.contentEl, this.service));
-		if (this.scope) this.panel.registerKeyboard(this.scope, () => this.leaveDisplay());
-		await this.panel.mount();
+	onOpen(): Promise<void> {
+		const panel = this.addChild(new TimelinePanel(this.app, this.contentEl, this.service));
+		this.panel = panel;
+		if (this.scope) panel.registerKeyboard(this.scope, () => this.leaveDisplay());
+		// Reading every daily note must not hold up workspace layout restoration.
+		void panel.mount().catch((error: unknown) => {
+			console.error('Soliloquy: failed to open timeline', error);
+			if (this.panel === panel) new Notice('Could not load the timeline.');
+		});
+		return Promise.resolve();
 	}
 
 	onClose(): Promise<void> {
@@ -42,8 +48,9 @@ export class SoliloquyView extends ItemView {
 		this.panel?.focus(target);
 	}
 
+	/** Background refresh: keeps drafts and skips the render when nothing changed. */
 	refreshTimeline(): Promise<void> {
-		return this.panel?.refreshTimeline(true) ?? Promise.resolve();
+		return this.panel?.refreshTimeline(true, true) ?? Promise.resolve();
 	}
 
 	private leaveDisplay(): void {
